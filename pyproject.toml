@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "fastapi", "uvicorn", "httpx", "jinja2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
