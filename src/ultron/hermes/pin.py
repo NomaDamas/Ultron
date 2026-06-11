@@ -10,3 +10,11 @@ VENDOR_REF_PATH = Path(__file__).resolve().parents[3] / "vendor" / "hermes-agent
 def vendor_present() -> bool:
     """Return whether the pinned vendored Hermes reference is present locally."""
     return VENDOR_REF_PATH.is_dir()
+
+def assert_pin_matches(contract_commit: str) -> None:
+    """Raise if a loaded contract's hermes_commit drifts from the pinned commit."""
+    if contract_commit != HERMES_PINNED_COMMIT:
+        raise ValueError(
+            f"contract hermes_commit {contract_commit!r} does not match "
+            f"pinned commit {HERMES_PINNED_COMMIT!r}"
+        )

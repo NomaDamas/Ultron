@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ultron.hermes.capability import AdapterCapabilityContract, AttachSurface, CapabilityStatus
 
@@ -34,7 +34,15 @@ PRESERVED_CORE_PROHIBITIONS: tuple[str, ...] = (
 
 
 class ModuleSurfaceContract(BaseModel):
-    """Attach surfaces a module may declare."""
+    """Attach surfaces a module may declare.
+
+    ``extra="forbid"`` structurally rejects any undeclared field, including the
+    preserved-core prohibition keys, so a module cannot even be constructed with
+    a prohibited surface. Deferred-surface enforcement flows through
+    :meth:`violations` / :meth:`validated`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     prompt_slots: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
@@ -44,6 +52,26 @@ class ModuleSurfaceContract(BaseModel):
     safety: dict[str, Any] | None = None
     budget: dict[str, Any] | None = None
     persistence: dict[str, Any] | None = None
+
+    def violations(self, contract: AdapterCapabilityContract) -> list["Violation"]:
+        """Deferred/prohibited-surface violations for this declared module."""
+        return validate_module_surfaces(self.model_dump(), contract)
+
+    @classmethod
+    def validated(
+        cls, declared: dict[str, Any], contract: AdapterCapabilityContract
+    ) -> "ModuleSurfaceContract":
+        """Build from a raw declaration, raising on any violation.
+
+        Prohibited surface keys are rejected by ``extra="forbid"`` at
+        construction; deferred attach surfaces are rejected here.
+        """
+        instance = cls.model_validate(declared)
+        found = instance.violations(contract)
+        if found:
+            detail = "; ".join(f"{v.surface}: {v.reason}" for v in found)
+            raise ValueError(f"invalid module surfaces: {detail}")
+        return instance
 
 
 @dataclass(frozen=True)
