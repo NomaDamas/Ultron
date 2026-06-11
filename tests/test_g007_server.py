@@ -4,6 +4,7 @@ except ModuleNotFoundError:  # pragma: no cover
     TestClient = None
 
 from ultron.app.server import create_app
+from ultron.evaluation.harness import PairedTask
 from ultron.evolution.variation import VariationPrimitive
 
 
@@ -66,6 +67,45 @@ def test_approve_promotion_without_promotable_evidence_denies_and_does_not_advan
     assert denied.status_code == 403
     assert "policy" in denied.json()["detail"]
     assert engine.current_pointer_version() == before
+
+
+def test_unknown_approve_promotion_denies_without_polluting_pointer_and_requests_still_work():
+    client = _client()
+    csrf = _authed(client)
+    engine = client.app.state.triage
+    before_version = engine.current_pointer_version()
+    _, before_active = engine.pointer_store.get(engine.pointer_key)
+
+    denied = _privileged(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": "deadbeef"}, before_version)
+
+    assert denied.status_code == 403
+    assert "policy" in denied.json()["detail"]
+    assert engine.pointer_store.get(engine.pointer_key) == (before_version, before_active)
+
+    submitted = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "after deadbeef"}})
+    assert submitted.status_code == 200
+    assert submitted.json()["result"]["run_manifest"]["signature"]
+
+
+def test_non_promotable_evaluated_candidate_denies_without_pointer_change():
+    client = _client()
+    csrf = _authed(client)
+    engine = client.app.state.triage
+    before_version = engine.current_pointer_version()
+    _, before_active = engine.pointer_store.get(engine.pointer_key)
+    canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "negative-candidate"})
+    candidate_hash = canary["candidate"].content_hash
+    evaluation = engine.evaluate_and_decide(
+        candidate_hash,
+        [PairedTask(task_id=f"negative-{i}", baseline_metric=1.0, candidate_metric=0.9) for i in range(10)],
+        canary["canary_id"],
+    )
+    assert evaluation["report"].promotable is False
+
+    denied = _privileged(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": candidate_hash}, before_version)
+
+    assert denied.status_code == 403
+    assert engine.pointer_store.get(engine.pointer_key) == (before_version, before_active)
 
 
 def test_submit_request_creates_evaluates_and_approve_promotion_advances_pointer():

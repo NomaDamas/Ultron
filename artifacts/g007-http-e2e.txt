@@ -1,24 +1,15 @@
-== GET / ==
-status 200 | CSP set: True
-CSP: default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none
-inline <script> with body present: False
-external app.js referenced: True
-session+csrf acquired: True True
-
-== GET /api/uispec ==
-status 200 | components: ['INTAKE_PANEL', 'PLAN_PANEL', 'RISK_PANEL', 'TEST_PANEL', 'FEEDBACK_PANEL', 'APPROVAL_PANEL', 'ROLLBACK_PANEL']
-
-== POST /api/action unknown type (expect 422) ==
-status 422 -> {"detail":[{"type":"enum","loc":["body","type"],"msg":"Input should be 'SUBMIT_REQUEST', 'GIVE_FEEDBACK', 'APPROVE_PROMO
-
-== POST privileged APPROVE_PROMOTION without csrf/auth (expect 403) ==
-status 403 -> {"detail":"privileged action requires a valid CSRF token"}
-
-== POST SUBMIT_REQUEST (non-privileged, expect 200 triage result) ==
-status 200
-result keys: ['ok', 'result']
-
-== POST APPROVE_PROMOTION stale pointer version (expect 403) ==
-status 403 -> {"detail":"privileged action rejected stale active pointer version"}
-
-HTTP-E2E-DONE
+GET / : 200 | CSP set: True | no inline script: True | csrf: True
+unknown action -> 422 (expect 422)
+APPROVE no csrf -> 403 (expect 403)
+APPROVE bogus candidate (no evidence) -> 500 (expect 403 policy denial)
+Traceback (most recent call last):
+  File "<stdin>", line 21, in <module>
+  File "/usr/local/lib/python3.12/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/decoder.py", line 338, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/json/decoder.py", line 356, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)

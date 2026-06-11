@@ -16,7 +16,7 @@ from ultron.module.contract import load_default_contract
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
 from ultron.ledger.canary_store import CanaryScopedStore, RollbackController
 from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind, SideEffectLedger
-from ultron.module.model import FitnessMetadata, HarnessModule, PersistencePolicy, PrivacyMetadata, PromotionState, TargetLens
+from ultron.module.model import EvidenceLabel, FitnessMetadata, HarnessModule, PersistencePolicy, PrivacyMetadata, PromotionState, TargetLens
 from ultron.registry.pointer import ActivePointerStore
 from ultron.registry.store import ModuleLifecycle, ModuleRegistry
 from ultron.run.manifest import RunManifest
@@ -25,6 +25,14 @@ from ultron.ui.runtime import ComponentType, UiSpec, build_uispec_from_manifest
 
 DEFAULT_SCOPE = "default-user"
 DEFAULT_WORKFLOW = "code-triage"
+
+PROMOTABLE_EVIDENCE_LABELS = {EvidenceLabel.BENCHMARK, EvidenceLabel.CAUSAL_SUFFICIENT}
+
+
+class PolicyDenied(PermissionError):
+    """Raised when a privileged action fails product policy without mutating state."""
+
+
 
 
 class TriageApp:
@@ -256,16 +264,24 @@ class TriageApp:
             return False
         report = stored["report"]
         outcome = stored["outcome"]
-        return bool(report.promotable and outcome.promotable)
+        return bool(
+            report.evidence_label in PROMOTABLE_EVIDENCE_LABELS
+            and report.promotable
+            and outcome.promotable
+        )
 
     def approve_promotion(self, candidate_hash: str, expected_pointer_version: int) -> dict[str, Any]:
         stored = self.evaluated_candidates.get(candidate_hash)
         if stored is None:
-            raise PermissionError("candidate has no stored evaluation evidence")
+            raise PolicyDenied("candidate has no stored evaluation evidence")
         report: EvaluationReport = stored["report"]
         outcome: SelectionOutcome = stored["outcome"]
-        if not (report.promotable and outcome.promotable):
-            raise PermissionError("candidate evaluation evidence is not promotable")
+        if not self.has_promotable_evidence(candidate_hash):
+            raise PolicyDenied("candidate evaluation evidence is not promotable")
+        try:
+            self.registry.get(candidate_hash)
+        except KeyError as exc:
+            raise PolicyDenied("candidate module is not registered") from exc
         retained = self.evolution_loop.retain(candidate_hash, outcome, DEFAULT_SCOPE, DEFAULT_WORKFLOW, expected_pointer_version)
         return {"report": report, "outcome": outcome, "promoted": retained, "canary_id": stored.get("canary_id")}
 

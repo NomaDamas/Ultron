@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, TriageApp
+from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, PolicyDenied, TriageApp
 from ultron.evaluation.harness import PairedTask
 from ultron.evolution.variation import VariationPrimitive
 from ultron.ui.runtime import ActionCommand, ActionType, validate_action
@@ -97,9 +97,9 @@ def create_app() -> FastAPI:
             candidate_hash = str(cmd.payload.get("candidate_hash") or "")
             try:
                 decision = engine.approve_promotion(candidate_hash, cmd.active_pointer_version or -1)
-            except PermissionError as exc:
+            except PolicyDenied as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
-            except ValueError as exc:
+            except (KeyError, PermissionError, ValueError) as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             return _jsonable({"ok": True, "decision": decision})
         if cmd.type is ActionType.ROLLBACK_CANARY:
@@ -124,7 +124,10 @@ def _policy_ok(engine: TriageApp, cmd: ActionCommand) -> bool:
     # The policy and evidence gates below are product-real and independent of that MVP auth boundary.
     if cmd.type is ActionType.APPROVE_PROMOTION:
         candidate_hash = str(cmd.payload.get("candidate_hash") or "")
-        return engine.has_promotable_evidence(candidate_hash)
+        try:
+            return engine.has_promotable_evidence(candidate_hash)
+        except KeyError:
+            return False
     if cmd.type is ActionType.ROLLBACK_CANARY:
         return engine.canary_active(str(cmd.payload.get("canary_id") or ""))
     if cmd.type is ActionType.RESTORE_MODULE:
