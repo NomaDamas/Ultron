@@ -48,6 +48,7 @@ class ModuleRegistry:
 
     def __init__(self) -> None:
         self._entries: dict[str, RegistryEntry] = {}
+        self._registration_returns: dict[str, RegistryEntry] = {}
 
     def register(
         self,
@@ -71,13 +72,13 @@ class ModuleRegistry:
         if existing is not None:
             if _module_identity_bytes(existing.module) != _module_identity_bytes(finalized):
                 raise ValueError("content hash collision: existing module bytes differ")
-            return existing
+            return self._registration_returns[supplied_hash]
 
         if supplied_hash != finalized.content_hash:
             raise ValueError("content hash does not match module identity bytes")
 
         entry = RegistryEntry(
-            module=finalized,
+            module=finalized.model_copy(deep=True),
             lifecycle=lifecycle,
             layer=layer,
             created_at=time.time(),
@@ -85,39 +86,44 @@ class ModuleRegistry:
             redacted=redacted,
             human_approved_additive=human_approved_additive,
         )
-        self._entries[finalized.content_hash] = entry
-        return entry
+        stored_entry = entry.model_copy(deep=True)
+        self._entries[finalized.content_hash] = stored_entry
+        returned_entry = stored_entry.model_copy(deep=True)
+        self._registration_returns[finalized.content_hash] = returned_entry
+        return returned_entry
 
     def get(self, content_hash: str) -> RegistryEntry:
-        return self._entries[content_hash]
+        return self._entries[content_hash].model_copy(deep=True)
 
     def versions_of(self, module_id: str) -> list[RegistryEntry]:
-        return sorted(
+        entries = sorted(
             (entry for entry in self._entries.values() if entry.module.module_id == module_id),
             key=lambda entry: (entry.module.version, entry.module.content_hash or ""),
         )
+        return [entry.model_copy(deep=True) for entry in entries]
 
     def lineage(self, content_hash: str) -> list[RegistryEntry]:
         lineage: list[RegistryEntry] = []
-        current = self.get(content_hash)
+        current = self._entries[content_hash]
         while True:
-            lineage.append(current)
+            lineage.append(current.model_copy(deep=True))
             parent_hash = current.module.parent_id
             if parent_hash is None:
                 return lineage
-            current = self.get(parent_hash)
+            current = self._entries[parent_hash]
 
     def set_lifecycle(self, content_hash: str, new_lifecycle: ModuleLifecycle) -> RegistryEntry:
-        existing = self.get(content_hash)
-        updated = existing.model_copy(update={"lifecycle": new_lifecycle})
+        existing = self._entries[content_hash]
+        updated = existing.model_copy(update={"lifecycle": new_lifecycle}, deep=True)
         self._entries[content_hash] = updated
-        return updated
+        self._registration_returns[content_hash] = updated.model_copy(deep=True)
+        return updated.model_copy(deep=True)
 
     def can_auto_promote(self, content_hash: str) -> bool:
-        candidate = self.get(content_hash).module
+        candidate = self._entries[content_hash].module
         if candidate.parent_id is None:
             return True
-        parent = self.get(candidate.parent_id).module
+        parent = self._entries[candidate.parent_id].module
         return not _expands_permissions(candidate, parent)
 
 
@@ -130,11 +136,11 @@ def _module_identity_bytes(module: HarnessModule) -> bytes:
 
 
 def _expands_permissions(candidate: HarnessModule, parent: HarnessModule) -> bool:
-    if set(candidate.surfaces.tools) > set(parent.surfaces.tools):
+    if not set(candidate.surfaces.tools).issubset(set(parent.surfaces.tools)):
         return True
-    if _declared_surface_names(candidate) > _declared_surface_names(parent):
+    if not _declared_surface_names(candidate).issubset(_declared_surface_names(parent)):
         return True
-    if set(candidate.required_adapter_capabilities) > set(parent.required_adapter_capabilities):
+    if not set(candidate.required_adapter_capabilities).issubset(set(parent.required_adapter_capabilities)):
         return True
     return _persistence_rank(candidate.persistence_policy) > _persistence_rank(parent.persistence_policy)
 

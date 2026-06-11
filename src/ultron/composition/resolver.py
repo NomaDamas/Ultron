@@ -114,10 +114,13 @@ def _resolve_tools(enabled: list[RegistryEntry]) -> tuple[list[str], list[Surfac
     if not enabled:
         return [], []
     tool_sets = [set(entry.module.surfaces.tools) for entry in enabled]
-    if any(entry.human_approved_additive for entry in enabled):
-        return sorted(set().union(*tool_sets)), []
     intersection = set.intersection(*tool_sets) if tool_sets else set()
-    dropped = sorted(set().union(*tool_sets) - intersection)
+    union = set().union(*tool_sets)
+    additive_tools = set().union(
+        *(set(entry.module.surfaces.tools) for entry in enabled if entry.human_approved_additive)
+    )
+    resolved = intersection | additive_tools
+    dropped = sorted(union - resolved)
     conflicts: list[SurfaceConflict] = []
     if dropped:
         conflicts.append(
@@ -129,7 +132,20 @@ def _resolve_tools(enabled: list[RegistryEntry]) -> tuple[list[str], list[Surfac
                 rationale="tool allowlist uses intersection by default; dropped: " + ", ".join(dropped),
             )
         )
-    return sorted(intersection), conflicts
+    added = sorted(additive_tools - intersection)
+    if added:
+        conflicts.append(
+            SurfaceConflict(
+                surface="tools",
+                kind="approved_additive_tools",
+                winner_hash=None,
+                losers=sorted(
+                    entry.module.content_hash or "" for entry in enabled if entry.human_approved_additive
+                ),
+                rationale="human-approved additive tools added: " + ", ".join(added),
+            )
+        )
+    return sorted(resolved), conflicts
 
 
 def _resolve_prompts(enabled: list[RegistryEntry]) -> list[str]:

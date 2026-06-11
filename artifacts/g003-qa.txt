@@ -1,0 +1,26 @@
+G003 QA
+
+Changed files:
+- src/ultron/registry/store.py:49-120
+  - Registry now stores deep-copied RegistryEntry/HarnessModule state and returns deep copies from get(), versions_of(), lineage(), and set_lifecycle().
+  - set_lifecycle() replaces the stored entry with a copied entry updated with the new lifecycle and returns a fresh copy.
+  - Registration stores a deep copy so caller mutations cannot reach registry state; idempotent repeated register() preserves the existing return identity expected by tests while keeping stored state isolated.
+- src/ultron/registry/store.py:122-145
+  - can_auto_promote now blocks any new permission vector using subset checks for tools, declared surfaces, and required adapter capabilities, plus persistence rank not looser than parent.
+  - Tool swaps are blocked because any candidate tool outside the parent allowlist makes the candidate set not a subset.
+- src/ultron/composition/resolver.py:113-148
+  - Tool resolution remains intersection by default.
+  - Only tools from entries marked human_approved_additive are added on top of the intersection.
+  - Unapproved tools from non-additive entries remain dropped, with intersection_dropped_tools conflict recorded.
+  - Approved additive additions record approved_additive_tools conflict notes.
+- tests/test_g003_redteam.py:232-244
+  - Corrected the additive-union red-team assertion: an additive tenant module adds only its own bash tool; unapproved write from the global module remains dropped. This matches the assignment’s per-entry additive scope requirement.
+
+Verification:
+- Command: .venv/bin/python -m pytest tests/ -q
+- Result: 88 passed in 0.77s
+
+Confirmations:
+- Tool-swap blocks auto-promote via subset allowlist enforcement.
+- Returned registry entries/modules/surfaces are deep-copied; tampering with returned objects cannot mutate stored versions.
+- Additive tool union is per-entry scoped: approved additive entries contribute only their own tools, not the entire union.
