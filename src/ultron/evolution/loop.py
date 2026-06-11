@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ultron.evolution.selection import SelectionOutcome, Selector
+from ultron.evolution.selection import SelectionOutcome, Selector, derives_promotable
 from ultron.registry.pointer import ActivePointerStore
 from ultron.registry.store import ModuleLifecycle, ModuleRegistry
 
@@ -61,7 +61,7 @@ class EvolutionLoop:
         workflow_fingerprint: str,
         expected_version: int,
     ) -> bool:
-        if not outcome.promotable:
+        if not self._outcome_is_promotable(outcome):
             self.registry.set_lifecycle(candidate_hash, ModuleLifecycle.DECAYING)
             return False
         key = (user_scope, workflow_fingerprint)
@@ -79,12 +79,15 @@ class EvolutionLoop:
                 raise ValueError("active module cap cannot be satisfied without evicting protected candidate")
             new_active.remove(evict)
             evicted.append(evict)
+        for module_hash in evicted:
+            self._validate_prune_allowed(module_hash, new_active)
         self.pointer_store.swap(key, expected_version, new_active)
+        now = time.time()
         self.registry.set_lifecycle(candidate_hash, ModuleLifecycle.SURVIVOR)
         for module_hash in evicted:
             self.registry.set_lifecycle(module_hash, ModuleLifecycle.PRUNED)
-            self._last_prune_at[module_hash] = time.time()
-        self._last_promotion_at[self._cooldown_key(key)] = time.time()
+            self._last_prune_at[module_hash] = now
+        self._last_promotion_at[self._cooldown_key(key)] = now
         return True
 
     def atrophy_scan(self, active_hashes: list[str], now: float) -> list[str]:
@@ -110,8 +113,10 @@ class EvolutionLoop:
         return eligible
 
     def prune(self, module_hash: str, *, is_critical_seed: bool = False, approved: bool = False) -> bool:
-        if is_critical_seed and not approved:
-            raise ValueError("critical seed pruning requires approval")
+        if is_critical_seed:
+            if not approved:
+                raise ValueError("critical seed pruning requires approval")
+            self._critical_seeds.add(module_hash)
         now = time.time()
         if self._is_prune_cooling_down(module_hash, now):
             raise ValueError("prune cooldown active")
@@ -120,9 +125,9 @@ class EvolutionLoop:
             version, active = self.pointer_store.get(key)
             if module_hash not in active:
                 continue
-            if len(active) - 1 < self.controls.diversity_floor:
-                raise ValueError("prune would breach diversity floor")
-            self.pointer_store.swap(key, version, [h for h in active if h != module_hash])
+            new_active = [h for h in active if h != module_hash]
+            self._validate_prune_allowed(module_hash, new_active, approved=approved)
+            self.pointer_store.swap(key, version, new_active)
             changed = True
         self.registry.set_lifecycle(module_hash, ModuleLifecycle.PRUNED)
         self._last_prune_at[module_hash] = now
@@ -143,14 +148,21 @@ class EvolutionLoop:
             self.registry.set_lifecycle(module_hash, ModuleLifecycle.SURVIVOR)
             return False
         new_active = list(active) + [module_hash]
+        evicted: list[str] = []
         while len(new_active) > self.controls.active_module_cap:
             evict = self._eviction_candidate(new_active, protected={module_hash})
             if evict is None:
                 raise ValueError("active module cap cannot be satisfied")
             new_active.remove(evict)
-            self.registry.set_lifecycle(evict, ModuleLifecycle.PRUNED)
+            evicted.append(evict)
+        for evict in evicted:
+            self._validate_prune_allowed(evict, new_active)
         self.pointer_store.swap(key, expected_version, new_active)
+        now = time.time()
         self.registry.set_lifecycle(module_hash, ModuleLifecycle.SURVIVOR)
+        for evict in evicted:
+            self.registry.set_lifecycle(evict, ModuleLifecycle.PRUNED)
+            self._last_prune_at[evict] = now
         return True
 
     def mark_rollback(self, module_hash: str) -> None:
@@ -162,6 +174,21 @@ class EvolutionLoop:
     def mark_critical_seed(self, module_hash: str) -> None:
         self._critical_seeds.add(module_hash)
 
+
+    def _outcome_is_promotable(self, outcome: SelectionOutcome) -> bool:
+        return derives_promotable(
+            evidence_label=outcome.evidence_label,
+            primary_delta=outcome.primary_delta,
+            paired_tasks=outcome.paired_tasks,
+            guardrail_breaches=outcome.guardrail_breaches,
+            thresholds=self.selector.thresholds,
+        )
+
+    def _validate_prune_allowed(self, module_hash: str, remaining_active: list[str], *, approved: bool = False) -> None:
+        if module_hash in self._critical_seeds and not approved:
+            raise ValueError("critical seed pruning requires approval")
+        if len(remaining_active) < self.controls.diversity_floor:
+            raise ValueError("prune would breach diversity floor")
     def _check_promotion_cooldown(self, key: tuple[str, str]) -> None:
         if self.controls.promotion_cooldown_s <= 0:
             return

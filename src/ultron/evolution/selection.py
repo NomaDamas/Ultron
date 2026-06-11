@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ultron.module.model import EvidenceLabel
 
@@ -11,6 +11,24 @@ class SelectionThresholds(BaseModel):
     min_paired_tasks: int = 10
     min_primary_improvement: float = 0.10
     guardrail_tolerance: dict[str, float] = Field(default_factory=dict)
+
+PROMOTABLE_EVIDENCE_LABELS = {EvidenceLabel.BENCHMARK, EvidenceLabel.CAUSAL_SUFFICIENT}
+
+
+def derives_promotable(
+    *,
+    evidence_label: EvidenceLabel,
+    primary_delta: float,
+    paired_tasks: int,
+    guardrail_breaches: list[str],
+    thresholds: SelectionThresholds,
+) -> bool:
+    return (
+        evidence_label in PROMOTABLE_EVIDENCE_LABELS
+        and paired_tasks >= thresholds.min_paired_tasks
+        and primary_delta >= thresholds.min_primary_improvement
+        and not guardrail_breaches
+    )
 
 
 class SelectionOutcome(BaseModel):
@@ -23,6 +41,19 @@ class SelectionOutcome(BaseModel):
     guardrail_breaches: list[str]
     promotable: bool
     rationale: str
+
+    @model_validator(mode="after")
+    def _promotable_matches_fields(self) -> "SelectionOutcome":
+        derived = derives_promotable(
+            evidence_label=self.evidence_label,
+            primary_delta=self.primary_delta,
+            paired_tasks=self.paired_tasks,
+            guardrail_breaches=self.guardrail_breaches,
+            thresholds=SelectionThresholds(),
+        )
+        if self.promotable != derived:
+            raise ValueError("promotable must be derived from evidence label, thresholds, and guardrails")
+        return self
 
 
 class Selector:
@@ -54,7 +85,13 @@ class Selector:
         else:
             label = EvidenceLabel.INSUFFICIENT
             rationale = "selection threshold not met"
-        promotable = label in {EvidenceLabel.BENCHMARK, EvidenceLabel.CAUSAL_SUFFICIENT}
+        promotable = derives_promotable(
+            evidence_label=label,
+            primary_delta=primary_delta,
+            paired_tasks=paired_tasks,
+            guardrail_breaches=breaches,
+            thresholds=self.thresholds,
+        )
         return SelectionOutcome(
             candidate_hash=candidate_hash,
             evidence_label=label,

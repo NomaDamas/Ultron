@@ -119,8 +119,11 @@ class ModuleRegistry:
         self._registration_returns[content_hash] = updated.model_copy(deep=True)
         return updated.model_copy(deep=True)
 
-    def can_auto_promote(self, content_hash: str) -> bool:
-        candidate = self._entries[content_hash].module
+    def can_auto_promote(self, content_hash_or_module: str | HarnessModule) -> bool:
+        if isinstance(content_hash_or_module, HarnessModule):
+            candidate = content_hash_or_module.finalized()
+        else:
+            candidate = self._entries[content_hash_or_module].module
         if candidate.parent_id is None:
             return True
         parent = self._entries[candidate.parent_id].module
