@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -37,7 +38,7 @@ class TimestampSource(StrEnum):
 
 
 class FeedbackEvent(BaseModel):
-    model_config = ConfigDict(use_enum_values=False)
+    model_config = ConfigDict(use_enum_values=False, frozen=True)
 
     event_id: str
     event_type: FeedbackEventType
@@ -72,19 +73,24 @@ class FeedbackEvent(BaseModel):
             and self.verifier_id is not None
         )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _force_global_eligibility_predicate(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("global_template_eligibility") and not (
+            data.get("consent_class") == ConsentClass.GLOBAL_TEMPLATE
+            and data.get("redaction_status") == "redacted"
+        ):
+            data = {**data, "global_template_eligibility": False}
+        return data
+
     @model_validator(mode="after")
-    def _enforce_verifier_and_global_eligibility(self) -> "FeedbackEvent":
+    def _reject_model_generated_outcome_verifier(self) -> "FeedbackEvent":
         if (
             self.event_type == FeedbackEventType.OUTCOME
             and self.verifier_id is not None
             and self.source_reliability == SourceReliability.MODEL_GENERATED
         ):
             raise ValueError("model-generated feedback cannot verify outcomes")
-        if self.global_template_eligibility and not (
-            self.consent_class == ConsentClass.GLOBAL_TEMPLATE
-            and self.redaction_status == "redacted"
-        ):
-            self.global_template_eligibility = False
         return self
 
 
@@ -99,6 +105,8 @@ class FeedbackChannel:
             and event.source_reliability == SourceReliability.MODEL_GENERATED
         ):
             raise ValueError("model-generated feedback cannot verify outcomes")
+        if event.global_template_eligibility and not self._qualifies_for_global_template(event):
+            raise ValueError("global template eligibility requires global-template consent and redaction")
         self._events.append(event)
         return event
 
@@ -119,5 +127,15 @@ class FeedbackChannel:
             retained.append(event)
         self._events = retained
 
+    def _qualifies_for_global_template(self, event: FeedbackEvent) -> bool:
+        return (
+            event.consent_class == ConsentClass.GLOBAL_TEMPLATE
+            and event.redaction_status == "redacted"
+        )
+
     def global_eligible_events(self) -> list[FeedbackEvent]:
-        return [event for event in self._events if event.global_template_eligibility]
+        return [
+            event
+            for event in self._events
+            if event.global_template_eligibility and self._qualifies_for_global_template(event)
+        ]

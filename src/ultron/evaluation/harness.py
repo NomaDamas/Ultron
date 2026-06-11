@@ -80,11 +80,10 @@ class EvaluationHarness:
         self,
         selector: Selector,
         thresholds: SelectionThresholds,
-        guardrail_limits: dict[str, float],
+        guardrail_limits: dict[str, float] | None = None,
     ) -> None:
         self.selector = selector
         self.thresholds = thresholds
-        self.guardrail_limits = guardrail_limits
 
     def evaluate_paired(
         self,
@@ -104,7 +103,7 @@ class EvaluationHarness:
         mean_primary_delta = self._mean_primary_delta(tasks)
         baseline_metric = 1.0
         candidate_metric = 1.0 + mean_primary_delta
-        guardrail_breaches = self._guardrail_breaches(guardrails_before, guardrails_after)
+
 
         selection = self.selector.evaluate(
             candidate_hash=candidate_hash,
@@ -112,8 +111,9 @@ class EvaluationHarness:
             candidate_metric=candidate_metric,
             paired_tasks=paired_count,
             guardrails_before=guardrails_before.model_dump(),
-            guardrails_after=self._selector_after_guardrails(guardrails_before, guardrails_after, guardrail_breaches),
+            guardrails_after=guardrails_after.model_dump(),
         )
+        guardrail_breaches = selection.guardrail_breaches
         evidence_label = selection.evidence_label
         promotable = selection.promotable
         rationale = selection.rationale
@@ -122,10 +122,7 @@ class EvaluationHarness:
             evidence_label = EvidenceLabel.PREFERENCE
             promotable = False
             rationale = "low-N explicit user canary preference; not auto-promotable"
-        if guardrail_breaches:
-            evidence_label = EvidenceLabel.INSUFFICIENT
-            promotable = False
-            rationale = "guardrail breach: " + ", ".join(guardrail_breaches)
+
 
         return EvaluationReport(
             candidate_hash=candidate_hash,
@@ -148,35 +145,3 @@ class EvaluationHarness:
                 deltas.append((task.candidate_metric - task.baseline_metric) / abs(task.baseline_metric))
         return sum(deltas) / len(deltas)
 
-    def _guardrail_breaches(
-        self,
-        before: GuardrailMetrics,
-        after: GuardrailMetrics,
-    ) -> list[str]:
-        before_values = before.model_dump()
-        after_values = after.model_dump()
-        breaches: list[str] = []
-        for name, limit in self.guardrail_limits.items():
-            after_value = after_values.get(name)
-            if after_value is None:
-                continue
-            before_value = before_values.get(name, 0)
-            if after_value > before_value + limit:
-                breaches.append(name)
-        return sorted(breaches)
-
-    def _selector_after_guardrails(
-        self,
-        before: GuardrailMetrics,
-        after: GuardrailMetrics,
-        guardrail_breaches: list[str],
-    ) -> dict[str, float]:
-        selector_after = before.model_dump()
-        after_values = after.model_dump()
-        before_values = before.model_dump()
-        for name in guardrail_breaches:
-            selector_after[name] = before_values.get(name, 0) + self.thresholds.guardrail_tolerance.get(name, 0) + 1
-        for name, value in after_values.items():
-            if name not in self.guardrail_limits:
-                selector_after[name] = value
-        return selector_after

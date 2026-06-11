@@ -28,12 +28,15 @@ def frozen(**overrides: object) -> FrozenVersions:
     return FrozenVersions(**data)
 
 
-def harness(guardrail_limits: dict[str, float] | None = None) -> EvaluationHarness:
-    thresholds = SelectionThresholds(min_paired_tasks=10, min_primary_improvement=0.10)
+def harness() -> EvaluationHarness:
+    thresholds = SelectionThresholds(
+        min_paired_tasks=10,
+        min_primary_improvement=0.10,
+        guardrail_tolerance={"latency": 5, "privacy_violations": 0},
+    )
     return EvaluationHarness(
         selector=Selector(thresholds),
         thresholds=thresholds,
-        guardrail_limits=guardrail_limits or {"latency": 5, "privacy_violations": 0},
     )
 
 
@@ -68,6 +71,21 @@ def test_guardrail_breach_is_not_promotable() -> None:
         tasks=paired_tasks(10),
         guardrails_before=GuardrailMetrics(latency=10),
         guardrails_after=GuardrailMetrics(latency=20),
+    )
+
+    assert report.promotable is False
+    assert report.evidence_label == EvidenceLabel.INSUFFICIENT
+    assert report.guardrail_breaches == ["latency"]
+
+
+def test_guardrail_breach_uses_selector_tolerance_not_harness_limits() -> None:
+    report = harness().evaluate_paired(
+        candidate_hash="candidate-hash",
+        primitive_id="primitive-1",
+        frozen=frozen(),
+        tasks=paired_tasks(10),
+        guardrails_before=GuardrailMetrics(latency=10),
+        guardrails_after=GuardrailMetrics(latency=16),
     )
 
     assert report.promotable is False
