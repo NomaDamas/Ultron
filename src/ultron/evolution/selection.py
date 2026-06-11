@@ -68,6 +68,7 @@ class Selector:
         paired_tasks: int,
         guardrails_before: dict[str, float],
         guardrails_after: dict[str, float],
+        explicit_user_low_n: bool = False,
     ) -> SelectionOutcome:
         if baseline_metric == 0:
             primary_delta = candidate_metric - baseline_metric
@@ -81,7 +82,10 @@ class Selector:
             rationale = "benchmark threshold met"
         elif paired_tasks < self.thresholds.min_paired_tasks and primary_delta > 0 and not breaches:
             label = EvidenceLabel.PREFERENCE
-            rationale = "positive low-N explicit user preference"
+            if explicit_user_low_n:
+                rationale = "low-N explicit user canary preference; not auto-promotable"
+            else:
+                rationale = "positive low-N explicit user preference"
         else:
             label = EvidenceLabel.INSUFFICIENT
             rationale = "selection threshold not met"

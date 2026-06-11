@@ -80,7 +80,6 @@ class EvaluationHarness:
         self,
         selector: Selector,
         thresholds: SelectionThresholds,
-        guardrail_limits: dict[str, float] | None = None,
     ) -> None:
         self.selector = selector
         self.thresholds = thresholds
@@ -112,16 +111,12 @@ class EvaluationHarness:
             paired_tasks=paired_count,
             guardrails_before=guardrails_before.model_dump(),
             guardrails_after=guardrails_after.model_dump(),
+            explicit_user_low_n=explicit_user_low_n,
         )
         guardrail_breaches = selection.guardrail_breaches
         evidence_label = selection.evidence_label
         promotable = selection.promotable
         rationale = selection.rationale
-
-        if explicit_user_low_n and paired_count < self.thresholds.min_paired_tasks:
-            evidence_label = EvidenceLabel.PREFERENCE
-            promotable = False
-            rationale = "low-N explicit user canary preference; not auto-promotable"
 
 
         return EvaluationReport(
