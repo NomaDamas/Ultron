@@ -26,7 +26,10 @@ def test_full_triage_loop_seed_run_canary_promote_rollback_atrophy_restore():
         [PairedTask(task_id=f"good-{i}", baseline_metric=1.0, candidate_metric=1.2) for i in range(10)],
         canary["canary_id"],
     )
-    assert decision["promoted"] is True
+    assert decision["promotable"] is True
+    assert decision["report"].promotable is True
+    approved = app.approve_promotion(candidate_hash, app.current_pointer_version())
+    assert approved["promoted"] is True
     promoted_version, promoted_active = app.pointer_store.get(app.pointer_key)
     assert promoted_version == 2
     assert candidate_hash in promoted_active
@@ -38,8 +41,9 @@ def test_full_triage_loop_seed_run_canary_promote_rollback_atrophy_restore():
         [PairedTask(task_id=f"bad-{i}", baseline_metric=1.0, candidate_metric=0.95) for i in range(10)],
         bad["canary_id"],
     )
-    assert bad_decision["promoted"] is False
-    assert bad_decision["rollback"] is not None
+    assert bad_decision["promotable"] is False
+    rollback = app.rollback_controller.rollback(bad["canary_id"])
+    assert rollback is not None
     app.rollback_controller.assert_no_poisoning(bad["canary_id"])
     assert bad_hash not in app.pointer_store.get(app.pointer_key)[1]
 

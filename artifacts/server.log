@@ -1,0 +1,12 @@
+INFO:     Started server process [17120]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8717 (Press CTRL+C to quit)
+INFO:     127.0.0.1:45546 - "GET /api/uispec HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39332 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39346 - "GET /api/uispec HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39348 - "POST /api/action HTTP/1.1" 422 Unprocessable Entity
+INFO:     127.0.0.1:39354 - "POST /api/action HTTP/1.1" 403 Forbidden
+INFO:     127.0.0.1:39360 - "POST /api/action HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39372 - "POST /api/action HTTP/1.1" 403 Forbidden
+INFO:     127.0.0.1:40824 - "GET /api/uispec HTTP/1.1" 200 OK

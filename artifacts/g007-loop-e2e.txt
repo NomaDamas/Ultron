@@ -1,0 +1,16 @@
+RunManifest.verify(correct key): True | wrong key: False
+pointer version after seed/run: 1
+
+== GOOD: PROMPT_SLOT_EDIT -> evaluate +0.25 -> PROMOTE ==
+promoted: True | evidence: benchmark_evidence | pointer: 2
+
+== BAD: PROMPT_SLOT_EDIT -> evaluate -0.30 -> ROLLBACK + no-poisoning ==
+promoted: False | rollback report present: True
+rollback: {'canary_id': 'canary-ed5c4b355d07', 'pointer_reverted': False, 'dropped_namespaces': ['memory', 'adapter_state']}
+pointer version unchanged after rollback: 2 -> 2
+no_poisoning assert (raises if poisoned): PASS (no quarantined state readable)
+
+== ATROPHY + RESTORE ==
+atrophy_and_restore: {'module_hash': 'd1f5665ca55f3a3f91cfa7827a38ea2989c2693a14d6a46db883ec960b36a8e0', 'pruned': True, 'restored': True}
+
+LOOP-E2E-DONE

@@ -7,9 +7,9 @@ import uuid
 from typing import Any
 
 from ultron.composition.resolver import CompositionResolver
-from ultron.evaluation.harness import EvaluationHarness, FrozenVersions, GuardrailMetrics, PairedTask
+from ultron.evaluation.harness import EvaluationHarness, EvaluationReport, FrozenVersions, GuardrailMetrics, PairedTask
 from ultron.evolution.loop import EvolutionLoop, StabilityControls
-from ultron.evolution.selection import SelectionThresholds, Selector
+from ultron.evolution.selection import SelectionOutcome, SelectionThresholds, Selector
 from ultron.evolution.variation import VariationEngine, VariationPrimitive
 from ultron.feedback.channel import ConsentClass, FeedbackChannel, FeedbackEvent, FeedbackEventType, SourceReliability, TimestampSource
 from ultron.module.contract import load_default_contract
@@ -63,6 +63,8 @@ class TriageApp:
         self.last_ui_spec: UiSpec | None = None
         self.last_candidate_hash: str | None = None
         self.last_canary_id: str | None = None
+        self.evaluated_candidates: dict[str, dict[str, Any]] = {}
+        self.pending_permission_expansions: list[dict[str, Any]] = []
 
     @property
     def pointer_key(self) -> tuple[str, str]:
@@ -241,15 +243,47 @@ class TriageApp:
             GuardrailMetrics(),
             GuardrailMetrics(),
         )
-        version, _ = self.pointer_store.get(self.pointer_key)
-        if report.promotable:
-            retained = self.evolution_loop.retain(candidate_hash, self.selector.evaluate(candidate_hash, 1.0, 1.0 + report.mean_primary_delta, report.paired_tasks, {}, {}), DEFAULT_SCOPE, DEFAULT_WORKFLOW, version)
-            return {"report": report, "promoted": retained, "rollback": None}
-        self.evolution_loop.mark_rollback(candidate_hash)
-        self.registry.set_lifecycle(candidate_hash, ModuleLifecycle.DECAYING)
-        rollback = self.rollback_controller.rollback(canary_id)
-        self.rollback_controller.assert_no_poisoning(canary_id)
-        return {"report": report, "promoted": False, "rollback": rollback}
+        outcome = self.selector.evaluate(candidate_hash, 1.0, 1.0 + report.mean_primary_delta, report.paired_tasks, {}, {})
+        self.evaluated_candidates[candidate_hash] = {"report": report, "outcome": outcome, "canary_id": canary_id}
+        if not report.promotable:
+            self.evolution_loop.mark_rollback(candidate_hash)
+            self.registry.set_lifecycle(candidate_hash, ModuleLifecycle.DECAYING)
+        return {"report": report, "outcome": outcome, "promotable": report.promotable, "canary_id": canary_id}
+
+    def has_promotable_evidence(self, candidate_hash: str) -> bool:
+        stored = self.evaluated_candidates.get(candidate_hash)
+        if stored is None:
+            return False
+        report = stored["report"]
+        outcome = stored["outcome"]
+        return bool(report.promotable and outcome.promotable)
+
+    def approve_promotion(self, candidate_hash: str, expected_pointer_version: int) -> dict[str, Any]:
+        stored = self.evaluated_candidates.get(candidate_hash)
+        if stored is None:
+            raise PermissionError("candidate has no stored evaluation evidence")
+        report: EvaluationReport = stored["report"]
+        outcome: SelectionOutcome = stored["outcome"]
+        if not (report.promotable and outcome.promotable):
+            raise PermissionError("candidate evaluation evidence is not promotable")
+        retained = self.evolution_loop.retain(candidate_hash, outcome, DEFAULT_SCOPE, DEFAULT_WORKFLOW, expected_pointer_version)
+        return {"report": report, "outcome": outcome, "promoted": retained, "canary_id": stored.get("canary_id")}
+
+    def canary_active(self, canary_id: str) -> bool:
+        return bool(canary_id and self.canary_store.read(canary_id, "adapter_state", "candidate_hash"))
+
+    def module_is_pruned(self, module_hash: str) -> bool:
+        if not module_hash:
+            return False
+        try:
+            return self.registry.get(module_hash).lifecycle is ModuleLifecycle.PRUNED
+        except KeyError:
+            return False
+
+    def record_permission_expansion_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = {"request_id": uuid.uuid4().hex, "status": "pending_human_approval", "payload": dict(payload)}
+        self.pending_permission_expansions.append(request)
+        return request
 
     def atrophy_and_restore(self, module_hash: str | None = None) -> dict[str, Any]:
         self.seed_baseline()
