@@ -1,0 +1,1 @@
+"""Module composition package."""
