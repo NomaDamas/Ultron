@@ -1,0 +1,76 @@
+hermes_commit: ee1a744ace44d6ebdda599d0b3a07d0781c1d4cd
+surfaces:
+  - surface: session-start
+    status: SUPPORTED
+    hermes_refs:
+      - agent/conversation_loop.py:run_conversation
+      - hermes_state.py:SessionDB
+    rule: Start or attach sessions through Hermes conversation loop and SessionDB only.
+    fallback: null
+  - surface: prompt-slot-injection
+    status: SUPPORTED
+    hermes_refs:
+      - agent/prompt_builder.py:build_environment_hints
+      - agent/prompt_builder.py:_find_hermes_md
+      - agent/prompt_builder.py:load_soul_md
+      - agent/prompt_builder.py:build_skills_system_prompt
+      - agent/system_prompt.py
+    rule: Inject prompts only via HERMES.md, SOUL.md, context files, and skills directory seams.
+    fallback: null
+  - surface: tool-toolset-allowlist
+    status: SUPPORTED
+    hermes_refs:
+      - toolsets.py:create_custom_toolset
+      - toolsets.py:resolve_multiple_toolsets
+      - toolsets.py:validate_toolset
+      - toolsets.py:get_toolset_names
+      - toolsets.py:get_all_toolsets
+    rule: Declare tools through Hermes toolset allowlist APIs without changing tool implementations.
+    fallback: null
+  - surface: skill-reference
+    status: SUPPORTED
+    hermes_refs:
+      - agent/skill_bundles.py
+      - agent/prompt_builder.py:_build_skills_manifest
+    rule: Reference skills read-only through the Hermes skill bundle and manifest surfaces.
+    fallback: null
+  - surface: run-tagging
+    status: SUPPORTED
+    hermes_refs:
+      - agent/trajectory.py:save_trajectory
+    rule: Tag runs using trajectory metadata and exported trajectory identifiers.
+    fallback: null
+  - surface: trace-export
+    status: SUPPORTED
+    hermes_refs:
+      - agent/trajectory.py:save_trajectory
+    rule: Export traces through Hermes trajectory save_trajectory output.
+    fallback: null
+  - surface: budget-enforcement
+    status: SUPPORTED
+    hermes_refs:
+      - agent/iteration_budget.py:IterationBudget
+    rule: Enforce budgets through IterationBudget or an Ultron wrapper around it.
+    fallback: null
+  - surface: memory-skill-isolation
+    status: ISOLATED_HOME_FALLBACK
+    hermes_refs:
+      - hermes_state.py:SessionDB
+    rule: Use environment-isolated HOME/workspace and SessionDB paths; native gating is deferred.
+    fallback: isolated-home
+  - surface: outcome-export
+    status: PARTIAL
+    hermes_refs:
+      - agent/trajectory.py:save_trajectory
+    rule: use Ultron verifier fallback
+    fallback: ultron-verifier
+  - surface: topology-subagent-control
+    status: DEFERRED
+    hermes_refs: []
+    rule: Optional topology and subagent orchestration is not part of the MVP adapter surface.
+    fallback: null
+  - surface: cron-gateway-mcp-mutation
+    status: DEFERRED
+    hermes_refs: []
+    rule: Cron, gateway, MCP, and credential mutation are non-MVP and prohibited for modules.
+    fallback: null
