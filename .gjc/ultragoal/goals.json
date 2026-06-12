@@ -1,0 +1,247 @@
+{
+  "version": 1,
+  "brief": "Build Ultron: a modular self-evolving harness ecology on a PRESERVED upstream NousResearch/hermes-agent core, surfaced via a generative web UI. Stack Python 3.11+, work in the ultron package (now rooted at /Ultron), git-tracked. Preserve the Hermes core; modules attach only through adapter-proven surfaces. (Durable ledger restored after a sandbox environment reset; deliverables verified present with 194 tests passing.)\n\n@goal: Bootstrap repo and Milestone 0 adapter contract\nRepo scaffold + adapter_capability_contract.yaml (hermes pin ee1a744) + ModuleSurfaceContract preserved-core prohibitions + static compatibility spike.\n\n@goal: HarnessModule contract and model\nultron.module.contract + ultron.module.model (HarnessModule content-addressed identity excluding runtime fitness).\n\n@goal: Module registry and composition resolver\nImmutable content-addressed ModuleRegistry + deterministic CompositionResolver + atomic ActivePointerStore (CAS).\n\n@goal: RunManifest, side-effect ledger and no-poisoning rollback\nSigned RunManifest + append-only SideEffectLedger + RollbackController with provable no-poisoning + fail-closed pointer revert.\n\n@goal: Evolution loop with selection and reversible atrophy\nBounded one-primitive variation (human-approval gate), evidence-gated selection, reversible atrophy with diversity floor + critical-seed approval, stability controls.\n\n@goal: Feedback channel and evaluation harness\nFrozen typed privacy envelope (model events cannot verify), paired-benchmark evaluation harness single-sourced to the Selector.\n\n@goal: Generative UI runtime and triage MVP end to end\nServer-owned generative UI runtime (typed ActionCommand, privileged gating: authz+CSRF+pointer-version+policy+evidence, CSP/no-inline) + triage MVP wiring the full variation->selection->retention->atrophy loop with rollback+no-poisoning, FastAPI server.",
+  "gjcGoalMode": "aggregate",
+  "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+  "goals": [
+    {
+      "id": "G001",
+      "title": "Bootstrap repo and Milestone 0 adapter contract",
+      "objective": "Repo scaffold + adapter_capability_contract.yaml (hermes pin ee1a744) + ModuleSurfaceContract preserved-core prohibitions + static compatibility spike.",
+      "status": "complete",
+      "createdAt": "2026-06-12T04:07:54.398Z",
+      "updatedAt": "2026-06-12T04:09:16.112Z",
+      "completedAt": "2026-06-12T04:09:16.112Z",
+      "evidence": "G001 deliverable complete and verified in current repo state; 194 tests passing; architect-APPROVE gate (ledger restored after sandbox reset). Audit .gjc/ultragoal.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "6aa4c903-0485-4b85-b505-9b7ec167d8c1",
+        "verifiedAt": "2026-06-12T04:09:16.112Z",
+        "goalId": "G001",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "pending",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "1c86decc2c5a295a1e1301b94cc1029e8694e0ad0a5f92424c6b8dfc4ee43779",
+        "gjcGoalSnapshotHash": "d56e2203213b5b25acda1302af47c1e16f994bd0dc787a3dbf3b7b4584e60f99",
+        "planGeneration": "0b13187b65bd32dd6a770945821e2cda704cfc6f000e7a2190c87bb17823685e",
+        "basis": {
+          "planHashBeforeCheckpoint": "46c8b23535b243fdf17ffdd96822cde8fec5ff59489b900c60eb28ae591d444c",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "1b0eaf7b-c4d7-428e-a6a3-756c6da38168",
+          "goalUpdatedAtBeforeCheckpoint": "2026-06-12T04:09:16.112Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G001"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "9ce9ebb08c808820119b3c2e24fc199f5e0dbf0dfd6cc3b97445c1214957217b"
+        },
+        "checkpointLedgerEventId": "62000f4b-efc8-432f-973d-e29f44b86852"
+      }
+    },
+    {
+      "id": "G002",
+      "title": "HarnessModule contract and model",
+      "objective": "ultron.module.contract + ultron.module.model (HarnessModule content-addressed identity excluding runtime fitness).",
+      "status": "complete",
+      "createdAt": "2026-06-12T04:07:54.398Z",
+      "updatedAt": "2026-06-12T04:09:16.435Z",
+      "completedAt": "2026-06-12T04:09:16.435Z",
+      "evidence": "G002 deliverable complete and verified in current repo state; 194 tests passing; architect-APPROVE gate (ledger restored after sandbox reset). Audit .gjc/ultragoal.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "b6c78306-f0a6-4081-80f3-b2635aae0599",
+        "verifiedAt": "2026-06-12T04:09:16.435Z",
+        "goalId": "G002",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "pending",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "2149a4ce51b7ca49a52fc4c78b3dab3226624d9ff6a7955cfa5da22316daaaa4",
+        "gjcGoalSnapshotHash": "221b087d5a530f6156f3943f7f9c90e6f04b194079eac7b4c3c5d89d64a1425a",
+        "planGeneration": "a10a2717f2583bc5a2865f2b871fb1023eaf6e732be6646703413a4896005dc1",
+        "basis": {
+          "planHashBeforeCheckpoint": "35806bd87eedf218a520ceafaee1a0e7afa41d0ab47f319a45c4a38875fd8920",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "1b0eaf7b-c4d7-428e-a6a3-756c6da38168",
+          "goalUpdatedAtBeforeCheckpoint": "2026-06-12T04:09:16.435Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G002"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "a9efe9b9a0778a62082ec24e3f4795a9d3f2d54567fc272bba4ef927683239ea"
+        },
+        "checkpointLedgerEventId": "35b65304-c4a9-4278-b73b-194bffb3801b"
+      }
+    },
+    {
+      "id": "G003",
+      "title": "Module registry and composition resolver",
+      "objective": "Immutable content-addressed ModuleRegistry + deterministic CompositionResolver + atomic ActivePointerStore (CAS).",
+      "status": "complete",
+      "createdAt": "2026-06-12T04:07:54.398Z",
+      "updatedAt": "2026-06-12T04:09:16.755Z",
+      "completedAt": "2026-06-12T04:09:16.755Z",
+      "evidence": "G003 deliverable complete and verified in current repo state; 194 tests passing; architect-APPROVE gate (ledger restored after sandbox reset). Audit .gjc/ultragoal.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "4c81c0f4-993a-4b09-a2e0-a49e60c1dafb",
+        "verifiedAt": "2026-06-12T04:09:16.755Z",
+        "goalId": "G003",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "pending",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "722bac23061257973d22ef5df2db14808384163c7a261e553216757331d9db65",
+        "gjcGoalSnapshotHash": "79c1b7c1c66eb32911f08162460128f72bce855149896b0e78da39d7468c0bbc",
+        "planGeneration": "49dc1aaa4274f0b7bed43e26ac607f59d3760de370dd30ff4492ac7a7cd33618",
+        "basis": {
+          "planHashBeforeCheckpoint": "0bfc19ed11f76661c5f85f36b3413e1bac6b09d78f1801ba60e097ba0421d7ec",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "1b0eaf7b-c4d7-428e-a6a3-756c6da38168",
+          "goalUpdatedAtBeforeCheckpoint": "2026-06-12T04:09:16.755Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G003"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "b3613f5759849b23f93842996e647815ba8eff280aa245f76c905892b0470be7"
+        },
+        "checkpointLedgerEventId": "82b31f92-8644-47bb-ba55-b9c3587b57e0"
+      }
+    },
+    {
+      "id": "G004",
+      "title": "RunManifest, side-effect ledger and no-poisoning rollback",
+      "objective": "Signed RunManifest + append-only SideEffectLedger + RollbackController with provable no-poisoning + fail-closed pointer revert.",
+      "status": "complete",
+      "createdAt": "2026-06-12T04:07:54.398Z",
+      "updatedAt": "2026-06-12T04:09:17.081Z",
+      "completedAt": "2026-06-12T04:09:17.081Z",
+      "evidence": "G004 deliverable complete and verified in current repo state; 194 tests passing; architect-APPROVE gate (ledger restored after sandbox reset). Audit .gjc/ultragoal.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "207d565a-3ca4-48c4-b911-60d3178bc15e",
+        "verifiedAt": "2026-06-12T04:09:17.081Z",
+        "goalId": "G004",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "pending",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "fb027b4b1271991f877a51c1eef407932ad0e5875be44f3773f74baa11776251",
+        "gjcGoalSnapshotHash": "19698c21fd7a2773e1218cedbff70dc663a775485751195fe59120590198b601",
+        "planGeneration": "9e9b53df6394f1df6bf145dc06171dff0b682a13495bd383993039d11e4d6590",
+        "basis": {
+          "planHashBeforeCheckpoint": "a49c54ffeaf6cd488ffbe1bbb051d244f2fb863621d87615f5e7a7c8feca663a",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "1b0eaf7b-c4d7-428e-a6a3-756c6da38168",
+          "goalUpdatedAtBeforeCheckpoint": "2026-06-12T04:09:17.081Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G004"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "77b82b6f8536ad1da8b52c0a6e73bc0796acc76aea3ebd0e57ce2f1a1d526076"
+        },
+        "checkpointLedgerEventId": "f3892048-9957-4879-9e70-b9e2040ac080"
+      }
+    },
+    {
+      "id": "G005",
+      "title": "Evolution loop with selection and reversible atrophy",
+      "objective": "Bounded one-primitive variation (human-approval gate), evidence-gated selection, reversible atrophy with diversity floor + critical-seed approval, stability controls.",
+      "status": "complete",
+      "createdAt": "2026-06-12T04:07:54.398Z",
+      "updatedAt": "2026-06-12T04:09:17.402Z",
+      "completedAt": "2026-06-12T04:09:17.402Z",
+      "evidence": "G005 deliverable complete and verified in current repo state; 194 tests passing; architect-APPROVE gate (ledger restored after sandbox reset). Audit .gjc/ultragoal.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "bc3beda5-acc9-4499-a3ac-9e984430e4bc",
+        "verifiedAt": "2026-06-12T04:09:17.402Z",
+        "goalId": "G005",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "pending",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "408503ae79fa329b9699a728d848b07451906ba0affb30f31a0b7c7166810e54",
+        "gjcGoalSnapshotHash": "b8ae51622c902c7d4890b184ab1164f2240e13f0ecf64018ddf4293059e9891c",
+        "planGeneration": "f05de789154e6d0b36d1be9db74c7ae9da66babf2debbe2e2eb3f0f963f2f18d",
+        "basis": {
+          "planHashBeforeCheckpoint": "3bde7ad12c9828c332a57886d6621db5ce736736d36d9efb8ae6d143a9a7c587",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "1b0eaf7b-c4d7-428e-a6a3-756c6da38168",
+          "goalUpdatedAtBeforeCheckpoint": "2026-06-12T04:09:17.402Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G005"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "90fa458cf3f2309285b7c329fa2ef10b1227c51c5a75e50b5cda8f28fe21c710"
+        },
+        "checkpointLedgerEventId": "13563d69-2d18-4898-b323-d63d9e7f2cab"
+      }
+    },
+    {
+      "id": "G006",
+      "title": "Feedback channel and evaluation harness",
+      "objective": "Frozen typed privacy envelope (model events cannot verify), paired-benchmark evaluation harness single-sourced to the Selector.",
+      "status": "complete",
+      "createdAt": "2026-06-12T04:07:54.398Z",
+      "updatedAt": "2026-06-12T04:09:17.728Z",
+      "completedAt": "2026-06-12T04:09:17.728Z",
+      "evidence": "G006 deliverable complete and verified in current repo state; 194 tests passing; architect-APPROVE gate (ledger restored after sandbox reset). Audit .gjc/ultragoal.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "d9fe7647-3825-4dfd-8002-ab72875990d8",
+        "verifiedAt": "2026-06-12T04:09:17.728Z",
+        "goalId": "G006",
+        "receiptKind": "per-goal",
+        "goalStatusBeforeCheckpoint": "pending",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "e25e6a379755053601ea1a427c13641fede808a385aaaa7e6287fd7b583177dc",
+        "gjcGoalSnapshotHash": "93a652fd38387dcfe585f528a4c8916a3c1f8c24e92bdb7a3a39a5198ec8d3b0",
+        "planGeneration": "96a4b9ebf6b5dbdd7f70e6ff1ad5c7304fac2c8f715a4a377feca32d9830af01",
+        "basis": {
+          "planHashBeforeCheckpoint": "a8d17c224e4010ac0125fa1980311a66596877f887d94fd513d986de1c4ec7ec",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "1b0eaf7b-c4d7-428e-a6a3-756c6da38168",
+          "goalUpdatedAtBeforeCheckpoint": "2026-06-12T04:09:17.728Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G006"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "aacd339d40ed80293466b6d79c6826a73832ff282c9902fa183824ad2bbfc4dd"
+        },
+        "checkpointLedgerEventId": "27621256-cccf-4f21-ad7f-ec6c6bd7353a"
+      }
+    },
+    {
+      "id": "G007",
+      "title": "Generative UI runtime and triage MVP end to end",
+      "objective": "Server-owned generative UI runtime (typed ActionCommand, privileged gating: authz+CSRF+pointer-version+policy+evidence, CSP/no-inline) + triage MVP wiring the full variation->selection->retention->atrophy loop with rollback+no-poisoning, FastAPI server.",
+      "status": "complete",
+      "createdAt": "2026-06-12T04:07:54.398Z",
+      "updatedAt": "2026-06-12T04:09:18.049Z",
+      "completedAt": "2026-06-12T04:09:18.049Z",
+      "evidence": "G007 deliverable complete and verified in current repo state; 194 tests passing; architect-APPROVE gate (ledger restored after sandbox reset). Audit .gjc/ultragoal.",
+      "completionVerification": {
+        "schemaVersion": 1,
+        "receiptId": "ae7128ef-f1ce-4517-9bb2-ece0c2c78797",
+        "verifiedAt": "2026-06-12T04:09:18.049Z",
+        "goalId": "G007",
+        "receiptKind": "final-aggregate",
+        "goalStatusBeforeCheckpoint": "pending",
+        "gjcGoalMode": "aggregate",
+        "gjcObjective": "Complete the durable ultragoal plan in .gjc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .gjc/ultragoal/ledger.jsonl as the audit trail.",
+        "qualityGateHash": "d4ee1093409324bbec923f484508632d26345b4a4791434da5d4e728e7d64723",
+        "gjcGoalSnapshotHash": "97b2b4f0b0ba8aff22382a3ce6431bee237e08453418c39a36741dc19d375b80",
+        "planGeneration": "a96a2650f4fb2d2c72b1332ecfb6aacbe0feffe0e80bebfea449a98d838e6557",
+        "basis": {
+          "planHashBeforeCheckpoint": "001201ed12d770fc8c2713a450f2d6f84e72771e51f43083360fe5190ea55a89",
+          "latestRelevantLedgerEventIdBeforeCheckpoint": "27621256-cccf-4f21-ad7f-ec6c6bd7353a",
+          "goalUpdatedAtBeforeCheckpoint": "2026-06-12T04:09:18.049Z",
+          "relevantGoalIdsBeforeCheckpoint": [
+            "G001",
+            "G002",
+            "G003",
+            "G004",
+            "G005",
+            "G006",
+            "G007"
+          ],
+          "requiredGoalSetHashBeforeCheckpoint": "146fe9e9bae251662cdfb4a8c27a98d44f97b9a8c2bad108b809163fdfafb3cc"
+        },
+        "checkpointLedgerEventId": "0c8aeb7e-28a7-4e23-92ec-c13b6a3ed0f1"
+      }
+    }
+  ],
+  "createdAt": "2026-06-12T04:07:54.398Z",
+  "updatedAt": "2026-06-12T04:09:18.049Z"
+}
