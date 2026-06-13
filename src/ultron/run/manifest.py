@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ultron.composition.manifest import ModuleSetManifest
 from ultron.module.model import PersistencePolicy
+from ultron.run.signer import ManifestSigner
 
 DEFAULT_RUN_MANIFEST_SIGNING_KEY = "ultron-dev-run-manifest-key"
 
@@ -57,20 +58,26 @@ class RunManifest(BaseModel):
     side_effect_ledger_id: str
     created_at: float
     timestamp_source: str
+    key_id: str | None = None
     signature: str | None = None
 
     def canonical_payload(self) -> dict[str, Any]:
         """Return all signed fields, excluding only the signature itself."""
         return self.model_dump(mode="json", exclude={"signature"})
 
-    def sign(self, key: str = DEFAULT_RUN_MANIFEST_SIGNING_KEY) -> Self:
-        signature = hmac_sha256(key, canonical_json(self.canonical_payload()))
-        return self.model_copy(update={"signature": signature})
+    def sign(self, key: str = DEFAULT_RUN_MANIFEST_SIGNING_KEY, *, signer: ManifestSigner | None = None, key_id: str | None = None) -> Self:
+        payload = self.model_copy(update={"key_id": key_id or (signer.key_id if signer is not None else self.key_id)}).canonical_payload()
+        signature = signer.sign(payload) if signer is not None else hmac_sha256(key, canonical_json(payload))
+        return self.model_copy(update={"signature": signature, "key_id": payload.get("key_id")})
 
-    def verify(self, key: str = DEFAULT_RUN_MANIFEST_SIGNING_KEY) -> bool:
+    def verify(self, key: str = DEFAULT_RUN_MANIFEST_SIGNING_KEY, *, signer: ManifestSigner | None = None, key_id: str | None = None) -> bool:
         if self.signature is None:
             return False
-        expected = hmac_sha256(key, canonical_json(self.canonical_payload()))
+        expected_key_id = key_id or self.key_id
+        payload = self.model_copy(update={"key_id": expected_key_id}).canonical_payload()
+        if signer is not None:
+            return signer.verify(payload, self.signature, expected_key_id or "")
+        expected = hmac_sha256(key, canonical_json(payload))
         return hmac.compare_digest(self.signature, expected)
 
     @classmethod

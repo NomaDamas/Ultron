@@ -25,6 +25,9 @@ from ultron.module.model import EvidenceLabel, FitnessMetadata, HarnessModule, P
 from ultron.registry.pointer import ActivePointerStore
 from ultron.registry.store import ModuleLifecycle, ModuleRegistry
 from ultron.run.manifest import RunManifest
+from ultron.persistence.db import Database
+from ultron.persistence.sqlite_stores import SqliteActivePointerStore, SqliteBlobStore, SqliteEvaluatedCandidateStore, SqliteFeedbackChannel, SqliteModuleRegistry, SqliteSideEffectLedger
+from ultron.run.signer import FixtureKeyProvider, ManifestSigner
 from ultron.ui.runtime import ComponentType, UiSpec, build_uispec_from_manifest
 
 
@@ -46,6 +49,7 @@ class TriageApp:
         self.adapter_contract = load_default_contract()
         self.blob_store = BlobStore()
         self.registry = ModuleRegistry(self.blob_store)
+        self.manifest_signer: ManifestSigner | None = None
 
         self.pointer_store = ActivePointerStore()
         self.resolver = CompositionResolver(self.registry, self.adapter_contract)
@@ -193,6 +197,20 @@ class TriageApp:
             timestamp_source="server",
             persistence_mode=PersistencePolicy.ISOLATED,
             resolved_ui_spec_hash=ui_spec.spec_hash,
+        ).sign(signer=self.manifest_signer) if self.manifest_signer is not None else RunManifest.from_manifest_set(
+            manifest,
+            run_id=run_id,
+            session_id=session_id,
+            active_module_set_id=active_module_set_id,
+            hermes_version=self.frozen_versions.hermes_version,
+            adapter_version=self.frozen_versions.adapter_version,
+            contract_version=self.frozen_versions.contract_version,
+            model_snapshot=self._validated_model_snapshot(result),
+            side_effect_ledger_id="in-memory-ledger",
+            created_at=time.time(),
+            timestamp_source="server",
+            persistence_mode=PersistencePolicy.ISOLATED,
+            resolved_ui_spec_hash=ui_spec.spec_hash,
         ).sign()
         result_payload = result.model_dump(mode="json")
         for module_hash in manifest.ordered_module_hashes:
@@ -289,6 +307,23 @@ class TriageApp:
             variation_primitive_id=proposal.primitive.value,
             canary_id=canary_id,
             resolved_ui_spec_hash=ui_spec.spec_hash,
+        ).sign(signer=self.manifest_signer) if self.manifest_signer is not None else RunManifest.from_manifest_set(
+            manifest,
+            run_id=run_id,
+            session_id=session_id,
+            active_module_set_id=active_module_set_id,
+            hermes_version=self.frozen_versions.hermes_version,
+            adapter_version=self.frozen_versions.adapter_version,
+            contract_version=self.frozen_versions.contract_version,
+            model_snapshot=self._validated_model_snapshot(result),
+            side_effect_ledger_id="in-memory-ledger",
+            created_at=time.time(),
+            timestamp_source="server",
+            persistence_mode=PersistencePolicy.ISOLATED,
+            candidate_module_id=candidate_hash,
+            variation_primitive_id=proposal.primitive.value,
+            canary_id=canary_id,
+            resolved_ui_spec_hash=ui_spec.spec_hash,
         ).sign()
         result_payload = result.model_dump(mode="json")
         self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", candidate_hash, canary_id, SideEffectKind.ADAPTER_STATE, result_payload)
@@ -337,7 +372,23 @@ class TriageApp:
             self.registry.get(candidate_hash)
         except KeyError as exc:
             raise PolicyDenied("candidate module is not registered") from exc
-        retained = self.evolution_loop.retain(candidate_hash, outcome, DEFAULT_SCOPE, DEFAULT_WORKFLOW, expected_pointer_version)
+        if isinstance(self.pointer_store, SqliteActivePointerStore) and isinstance(self.registry, SqliteModuleRegistry) and isinstance(self.ledger, SqliteSideEffectLedger):
+            from ultron.persistence.unit_of_work import PromotionUnitOfWork
+            _, active = self.pointer_store.get(self.pointer_key)
+            new_active = list(active)
+            if candidate_hash not in new_active:
+                new_active.append(candidate_hash)
+            PromotionUnitOfWork(self.pointer_store.db, self.registry, self.pointer_store, self.ledger).promote(
+                candidate_hash,
+                expected_pointer_version,
+                new_active,
+                evidence_id=report.frozen_versions_hash,
+                actor="triage-app",
+                key=self.pointer_key,
+            )
+            retained = True
+        else:
+            retained = self.evolution_loop.retain(candidate_hash, outcome, DEFAULT_SCOPE, DEFAULT_WORKFLOW, expected_pointer_version)
         return {"report": report, "outcome": outcome, "promoted": retained, "canary_id": stored.get("canary_id")}
 
     def canary_active(self, canary_id: str) -> bool:
@@ -432,3 +483,35 @@ class TriageApp:
 
     def _append_ledger(self, run_id: str, module_set_hash: str, module_hash: str | None, canary_id: str | None, kind: SideEffectKind, payload: dict[str, Any]) -> None:
         self.ledger.append(LedgerEntry(run_id=run_id, module_set_hash=module_set_hash, module_hash=module_hash, canary_id=canary_id, kind=kind, payload=payload))
+
+def build_durable_triage_app(db_path: str, *, signer: ManifestSigner | None = None) -> TriageApp:
+    """Build a TriageApp backed by SQLite stores.
+
+    The default signer is fixture/dev-only so tests and local demos remain explicit; production callers
+    should pass a ManifestSigner sourced from EnvKeyProvider or another closed key provider.
+    """
+    app = TriageApp()
+    db = Database(db_path)
+    blob_store = SqliteBlobStore(db)
+    registry = SqliteModuleRegistry(db, blob_store)
+    pointer_store = SqliteActivePointerStore(db)
+    ledger = SqliteSideEffectLedger(db)
+    app.db = db
+    app.blob_store = blob_store
+    app.registry = registry
+    app.pointer_store = pointer_store
+    app.resolver = CompositionResolver(registry, app.adapter_contract)
+    app.ledger = ledger
+    app.canary_store = CanaryScopedStore()
+    app.rollback_controller = RollbackController(registry, ledger, app.canary_store, pointer_store)
+    app.variation_engine = VariationEngine(registry, app.adapter_contract, blob_store)
+    app.evolution_loop = EvolutionLoop(
+        registry,
+        pointer_store,
+        app.selector,
+        StabilityControls(active_module_cap=2, diversity_floor=0, promotion_cooldown_s=0, prune_cooldown_s=0),
+    )
+    app.feedback_channel = SqliteFeedbackChannel(db)
+    app.evaluated_candidates = SqliteEvaluatedCandidateStore(db)
+    app.manifest_signer = signer or ManifestSigner.from_provider("fixture-dev", FixtureKeyProvider({"fixture-dev": "ultron-dev-run-manifest-key"}))
+    return app

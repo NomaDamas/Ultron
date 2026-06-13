@@ -1,25 +1,26 @@
 ## Summary
-The two prior GAP1 blockers are resolved. Tool policy compilation is centralized in TriageApp._build_adapter_request, and PinnedHermesAdapter consumes the Hermes-native allowlist without recompilation; non-default pointer bootstrap is now committed only after live adapter validation succeeds.
+The two reported GAP2 blockers are resolved in the inspected product path: strict registries with a BlobStore now reject placeholder, missing, and hash-mismatched artifact refs, and the G007 canary path creates and registers a blob-backed PromptPack rather than carrying the submitted text as a fake hash. BlobStore kind/type enforcement is present. Remaining risk is test coverage depth for fail-closed missing-parent blob and non-prompt primitives, but the architecture no longer has a blocking product-path bypass.
 
 ## Analysis
-Spec compliance: src/ultron/hermes/adapter.py documents AdapterRunRequest.resolved_tool_allowlist as Hermes-native names compiled once by TriageApp._build_adapter_request. src/ultron/hermes/adapter.py build_invocation_plan assigns hermes_tool_allowlist = list(request.resolved_tool_allowlist) and performs no ToolPolicyCompiler call. src/ultron/app/triage.py _build_adapter_request calls ToolPolicyCompiler.compile(manifest.resolved_tool_allowlist) and stores compiled_tools.hermes_tools into AdapterRunRequest.resolved_tool_allowlist.
-
-Test coverage: tests/test_gap1_adapter.py test_triage_builder_to_pinned_adapter_preserves_compiled_native_tools constructs a request through TriageApp._build_adapter_request, computes expected native tools from logical read/search/pytest, asserts expected_tools is non-empty, then asserts both the request and PinnedHermesAdapter plan carry the same native list. The compiler mapping test in the same file verifies that read/search/pytest become read_file/search_files/terminal_process.
-
-Pointer bootstrap: src/ultron/app/triage.py start_run stages the default active pointer in local active and should_bootstrap_pointer for an empty non-default scope, then calls adapter.run and _validate_live_adapter_result before pointer_store.swap. tests/test_gap1_redteam.py test_live_guard_rejects_non_default_scope_without_pointer_bootstrap covers a rejecting live adapter and asserts the non-default pointer remains (0, []), last_manifest is None, and no ledger entries are written for the attempted run.
-
-Regression assessment: the changed boundaries are explicit and local. The adapter seam now receives a native tool contract and no longer owns translation. The pointer bootstrap path avoids poisoning active scope state on live validation failure. No inspected regression blocks approval.
+- Strict registry: `src/ultron/registry/store.py:53-57` makes `allow_unbacked_refs` an explicit constructor flag defaulting to `False`; `store.py:131-147` returns only when `blob_store is None`, skips only `None` refs, rejects non-SHA refs unless the explicit escape hatch is enabled, rejects missing SHA refs, and detects stored-content hash mismatch.
+- Blob kind/type: `src/ultron/module/blobs.py:67-85` maps each `BlobKind` to its model and raises `TypeError` before storing mismatched blob models; `get_typed` also enforces read-side type expectations.
+- Blob-backed canary: `src/ultron/evolution/variation.py:165-182` loads the parent `PromptPack`, mutates a slot, writes a new PromptPack blob, and returns its SHA as `prompt_pack_hash`; `variation.py:230-234` fail-closes when the parent artifact is missing from the BlobStore. Tool/UI/budget/safety edit paths similarly load parent blobs and write real blobs (`variation.py:184-228`).
+- Canary path: `src/ultron/app/triage.py:109-147` seeds baseline through `HarnessModule.create_with_blobs`; `triage.py:237-262` stages candidate creation through the blob-aware engine and then registers the resulting candidate in the strict registry. `src/ultron/app/server.py:82-86` still passes request text under `prompt_pack_hash`, but that value is now interpreted by the variation engine as new prompt text, not retained as the artifact ref.
+- Tests: `tests/test_gap2_blobs.py:83-103` covers complete/missing/placeholder/mismatched registry refs; `tests/test_gap2_redteam.py:178-206` keeps legacy placeholder acceptance restricted to `ModuleRegistry()` without a BlobStore and verifies strict rejection with a BlobStore; `tests/test_gap2_blobs.py:144-157` and `tests/test_g007_app.py:20-27` assert canary PromptPack blobs exist and hash-match. The recorded full suite is `224 passed, 3 skipped` in `artifacts/gap2-qa.txt`.
 
 ## Root Cause
-The original blockers were caused by duplicated ownership of tool translation across TriageApp and PinnedHermesAdapter, plus an eager non-default pointer bootstrap that mutated scope state before the live adapter result had passed validation.
+The original blocker was a boundary violation: artifact-reference fields were allowed to carry arbitrary semantic strings that looked like hashes/placeholders, so module identity and registry registration could appear content-addressed without a stored, verifiable artifact. The fix moves enforcement to the registry boundary and realizes variation changes into stored blobs before registration on the G007 path.
 
 ## Findings
-None.
+No CRITICAL or HIGH findings remain.
+
+- MEDIUM: `src/ultron/evolution/variation.py:230-234`, tests. Fail-closed parent-blob behavior is implemented but not directly tested for missing parent blobs after a BlobStore-backed registry already contains a malformed parent. Add a focused test that removes/tampers a parent blob and asserts `propose/apply` fail before candidate registration.
+- LOW: `src/ultron/evolution/variation.py:184-228`, tests. Product code realizes ToolPolicy/UI/Budget/Safety blobs, but tests only deeply assert the prompt path and BlobStore kind/type. Add one parametrized test for these primitives to protect the non-prompt blob-backed paths.
 
 ## Recommendations
-1. Keep ToolPolicyCompiler ownership in TriageApp._build_adapter_request and treat AdapterRunRequest.resolved_tool_allowlist as Hermes-native API surface.
-2. Keep pointer_store.swap for bootstrapped non-default scopes after adapter.run and _validate_live_adapter_result.
-3. Preserve the current regression tests because they exercise the exact former failure modes.
+1. Approve GAP2 after the blocker fixes; no remaining blocker was found in the inspected product path.
+2. Add follow-up regression tests for missing parent blob and the non-prompt blob-realization paths to reduce future drift risk.
+3. Keep legacy tests on `ModuleRegistry()`/`blob_store=None`; do not re-enable placeholder acceptance in BlobStore-backed product registries.
 
 ## Architectural Status
 CLEAR
@@ -28,5 +29,6 @@ CLEAR
 APPROVE
 
 ## Trade-offs
-- Centralized compilation in TriageApp gives a single policy boundary and simpler adapter contracts at the cost of requiring request builders to honor the native-list invariant.
-- Deferred pointer bootstrap prevents state poisoning on rejected live results at the cost of doing the live adapter call before the non-default pointer is materialized.
+- Strict BlobStore-backed registry: maximizes correctness and auditability; requires legacy fixtures to opt out explicitly with `blob_store=None` or `allow_unbacked_refs=True`.
+- Compatibility escape hatch: preserves old in-memory tests/fixtures; safe because it is not default-on and not used by the product `TriageApp` path.
+- Staging registry via deepcopy: keeps canary trial isolated until live adapter validation; acceptable because final registration rechecks the candidate against the strict real registry.
