@@ -74,6 +74,12 @@ def test_blob_content_addressing_idempotent_and_deep_copy():
     assert stored_again.slots["a"] == "one"
 
 
+def test_blob_store_rejects_kind_type_mismatch():
+    store = BlobStore()
+    with pytest.raises(TypeError, match="PROMPT_PACK blob must be PromptPack"):
+        store.put(BlobKind.PROMPT_PACK, ToolPolicyBlob(tools=["read"]))
+
+
 def test_registry_verifies_missing_mismatched_and_complete_blobs():
     store = BlobStore()
     registry = ModuleRegistry(store)
@@ -85,6 +91,10 @@ def test_registry_verifies_missing_mismatched_and_complete_blobs():
     missing = module.model_copy(update={"prompt_pack_hash": missing_hash}).finalized()
     with pytest.raises(ValueError, match="missing blob.*PROMPT_PACK"):
         registry.register(missing, ModuleLifecycle.SEED, "tenant")
+
+    placeholder = module.model_copy(update={"prompt_pack_hash": "candidate-placeholder"}).finalized()
+    with pytest.raises(ValueError, match="artifact ref not blob-backed.*PROMPT_PACK"):
+        registry.register(placeholder, ModuleLifecycle.SEED, "tenant")
 
     tampered_hash = module.prompt_pack_hash or ""
     store._blobs[(BlobKind.PROMPT_PACK, tampered_hash)] = PromptPack(slots={"triage.plan": "tampered"})
@@ -129,3 +139,19 @@ def test_seed_baseline_is_blob_backed_and_start_run_end_to_end():
     result = app.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "Fix a flaky test")
     assert result["run_manifest"].verify()
     assert result["adapter_result"].output
+
+
+def test_prompt_slot_edit_canary_creates_real_prompt_pack_blob_and_registers_strictly():
+    app = TriageApp()
+    baseline = app.seed_baseline()
+
+    canary = app.propose_and_canary("PROMPT_SLOT_EDIT", {"prompt_pack_hash": "Rewrite triage plan slot."})
+    candidate = canary["candidate"]
+
+    assert candidate.prompt_pack_hash != baseline.prompt_pack_hash
+    assert candidate.prompt_pack_hash is not None
+    stored = app.blob_store.get(BlobKind.PROMPT_PACK, candidate.prompt_pack_hash)
+    assert isinstance(stored, PromptPack)
+    assert stored.content_hash() == candidate.prompt_pack_hash
+    assert "Rewrite triage plan slot." in stored.slots.values()
+    assert app.registry.get(candidate.content_hash or "").module.prompt_pack_hash == candidate.prompt_pack_hash

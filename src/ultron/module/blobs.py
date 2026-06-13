@@ -64,6 +64,15 @@ BlobT = TypeVar("BlobT", bound=_CanonicalBlob)
 ModuleBlob = PromptPack | ToolPolicyBlob | UiPanelContract | SafetyPolicyBlob | BudgetPolicyBlob
 
 
+_BLOB_TYPES: dict[BlobKind, type[ModuleBlob]] = {
+    BlobKind.PROMPT_PACK: PromptPack,
+    BlobKind.TOOL_POLICY: ToolPolicyBlob,
+    BlobKind.UI_PANEL_CONTRACT: UiPanelContract,
+    BlobKind.SAFETY_POLICY: SafetyPolicyBlob,
+    BlobKind.BUDGET_POLICY: BudgetPolicyBlob,
+}
+
+
 class BlobStore:
     """In-memory content-addressed blob store keyed by kind and sha256 content hash."""
 
@@ -71,6 +80,9 @@ class BlobStore:
         self._blobs: dict[tuple[BlobKind, str], ModuleBlob] = {}
 
     def put(self, kind: BlobKind, blob: ModuleBlob) -> str:
+        expected_type = _BLOB_TYPES[kind]
+        if not isinstance(blob, expected_type):
+            raise TypeError(f"{kind.value} blob must be {expected_type.__name__}, got {type(blob).__name__}")
         content_hash = blob.content_hash()
         key = (kind, content_hash)
         existing = self._blobs.get(key)

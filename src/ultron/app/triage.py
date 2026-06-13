@@ -52,7 +52,7 @@ class TriageApp:
         self.ledger = SideEffectLedger()
         self.canary_store = CanaryScopedStore()
         self.rollback_controller = RollbackController(self.registry, self.ledger, self.canary_store, self.pointer_store)
-        self.variation_engine = VariationEngine(self.registry, self.adapter_contract)
+        self.variation_engine = VariationEngine(self.registry, self.adapter_contract, self.blob_store)
         self.thresholds = SelectionThresholds(min_paired_tasks=10, min_primary_improvement=0.10)
         self.selector = Selector(self.thresholds)
         self.evolution_loop = EvolutionLoop(
@@ -236,7 +236,7 @@ class TriageApp:
         parent_hash = active[-1]
         proposal = self.variation_engine.propose(parent_hash, VariationPrimitive(primitive), change)
         staging_registry = copy.deepcopy(self.registry)
-        staging_engine = VariationEngine(staging_registry, self.adapter_contract)
+        staging_engine = VariationEngine(staging_registry, self.adapter_contract, staging_registry.blob_store)
         candidate = staging_engine.apply(proposal)
         candidate_hash = candidate.content_hash or ""
         canary_id = f"canary-{candidate_hash[:12]}"

@@ -50,10 +50,11 @@ class RegistryEntry(BaseModel):
 class ModuleRegistry:
     """Content-addressed registry keyed by HarnessModule.content_hash."""
 
-    def __init__(self, blob_store: BlobStore | None = None) -> None:
+    def __init__(self, blob_store: BlobStore | None = None, *, allow_unbacked_refs: bool = False) -> None:
         self._entries: dict[str, RegistryEntry] = {}
         self._registration_returns: dict[str, RegistryEntry] = {}
         self.blob_store = blob_store
+        self.allow_unbacked_refs = allow_unbacked_refs
 
 
     def register(
@@ -134,7 +135,9 @@ class ModuleRegistry:
             if content_hash is None:
                 continue
             if not _is_sha256_hex(content_hash):
-                continue
+                if self.allow_unbacked_refs:
+                    continue
+                raise ValueError(f"artifact ref not blob-backed for {kind.value}: {content_hash}")
 
             if not self.blob_store.has(kind, content_hash):
                 raise ValueError(f"missing blob for {kind.value}: {content_hash}")

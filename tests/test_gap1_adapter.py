@@ -18,7 +18,7 @@ from ultron.hermes.adapter import (
 from ultron.hermes.capability import AttachSurface, CapabilityStatus
 from ultron.hermes.tool_policy import ToolPolicyCompiler
 from ultron.module.model import FitnessMetadata, HarnessModule, PersistencePolicy, PrivacyMetadata, PromotionState, TargetLens
-from ultron.registry.store import ModuleLifecycle
+from ultron.registry.store import ModuleLifecycle, ModuleRegistry
 from ultron.run.manifest import RunManifest
 
 
@@ -190,6 +190,8 @@ def _skill_module(module_id, layer_skill_refs, *, topology=False):
 
 def test_skill_refs_end_to_end_hash_and_deferred_exclusion():
     app = TriageApp()
+    app.registry = ModuleRegistry()
+    app.resolver = CompositionResolver(app.registry, app.adapter_contract)
     core = app.registry.register(_skill_module("core", ["core-skill", "shared"]), ModuleLifecycle.SURVIVOR, "global", consent_ok=True, redacted=True)
     user = app.registry.register(_skill_module("user", ["user-skill", "shared"]), ModuleLifecycle.SURVIVOR, "user")
     deferred = app.registry.register(_skill_module("deferred", ["deferred-skill"], topology=True), ModuleLifecycle.SURVIVOR, "canary")

@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from ultron.module.blobs import BlobKind, BlobStore, BudgetPolicyBlob, PromptPack, SafetyPolicyBlob, ToolPolicyBlob, UiPanelContract
 
 from ultron.hermes.capability import AttachSurface, CapabilityStatus
 from ultron.module.model import FitnessMetadata, HarnessModule, PromotionState
@@ -59,9 +60,10 @@ _CORE_CUSTOMIZATION_FIELDS = frozenset({
 
 
 class VariationEngine:
-    def __init__(self, registry: ModuleRegistry, adapter_contract: Any) -> None:
+    def __init__(self, registry: ModuleRegistry, adapter_contract: Any, blob_store: BlobStore | None = None) -> None:
         self.registry = registry
         self.adapter_contract = adapter_contract
+        self.blob_store = blob_store or registry.blob_store
 
     def propose(
         self,
@@ -130,12 +132,107 @@ class VariationEngine:
         data["parent_id"] = parent.content_hash
         data["version"] = parent.version + 1
         data["fitness"] = FitnessMetadata(promotion_state=PromotionState.CANDIDATE)
-        for field, value in change.items():
+        realized_change = self._realize_blob_change(parent, primitive, change)
+        for field, value in realized_change.items():
             _set_candidate_field(data, field, value)
         candidate = HarnessModule.model_validate(data).finalized()
         candidate.validate_surfaces(self.adapter_contract)
         return candidate
 
+    def _realize_blob_change(
+        self,
+        parent: HarnessModule,
+        primitive: VariationPrimitive,
+        change: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.blob_store is None:
+            return dict(change)
+        if len(change) != 1:
+            return dict(change)
+        field, value = next(iter(change.items()))
+        if primitive is VariationPrimitive.PROMPT_SLOT_EDIT:
+            return self._realize_prompt_pack_edit(parent, field, value)
+        if primitive is VariationPrimitive.TOOLSET_TOGGLE:
+            return self._realize_tool_policy_edit(parent, field, value)
+        if primitive is VariationPrimitive.UI_PANEL_PRIORITY:
+            return self._realize_ui_panel_edit(parent, field, value)
+        if primitive is VariationPrimitive.BUDGET_TIGHTEN:
+            return self._realize_budget_policy_edit(parent, field, value)
+        if primitive is VariationPrimitive.SAFETY_TIGHTEN:
+            return self._realize_safety_policy_edit(parent, field, value)
+        return dict(change)
+
+    def _realize_prompt_pack_edit(self, parent: HarnessModule, field: str, value: Any) -> dict[str, Any]:
+        parent_hash = self._required_parent_ref(parent.prompt_pack_hash, BlobKind.PROMPT_PACK)
+        parent_pack = self.blob_store.get_typed(BlobKind.PROMPT_PACK, parent_hash, PromptPack)
+        slots = dict(parent_pack.slots)
+        if field == "prompt_pack_hash":
+            text = str(value)
+            if not text:
+                raise ValueError("prompt slot edit cannot be empty")
+            slot = next(iter(slots), "default")
+            slots[slot] = text
+        elif field in {"prompt_slots", "surfaces.prompt_slots"}:
+            requested = list(value)
+            slots = {slot: slots.get(slot, parent_pack.slots.get(slot, "")) for slot in requested}
+        else:
+            return {field: value}
+        new_pack = PromptPack(slots=slots, notes=parent_pack.notes)
+        new_hash = self.blob_store.put(BlobKind.PROMPT_PACK, new_pack)
+        return {"prompt_pack_hash": new_hash}
+
+    def _realize_tool_policy_edit(self, parent: HarnessModule, field: str, value: Any) -> dict[str, Any]:
+        parent_hash = self._required_parent_ref(parent.tool_allowlist_hash, BlobKind.TOOL_POLICY)
+        parent_policy = self.blob_store.get_typed(BlobKind.TOOL_POLICY, parent_hash, ToolPolicyBlob)
+        tools = list(value) if field in {"tools", "surfaces.tools"} else list(parent_policy.tools)
+        if field == "tool_allowlist_hash":
+            tool = str(value)
+            if tool in tools:
+                tools.remove(tool)
+            else:
+                tools.append(tool)
+        elif field not in {"tools", "surfaces.tools"}:
+            return {field: value}
+        new_hash = self.blob_store.put(BlobKind.TOOL_POLICY, ToolPolicyBlob(tools=tools, rationale=parent_policy.rationale))
+        return {"tool_allowlist_hash": new_hash, "surfaces.tools": tools}
+
+    def _realize_ui_panel_edit(self, parent: HarnessModule, field: str, value: Any) -> dict[str, Any]:
+        parent_hash = self._required_parent_ref(parent.ui_panel_contract_hash, BlobKind.UI_PANEL_CONTRACT)
+        parent_contract = self.blob_store.get_typed(BlobKind.UI_PANEL_CONTRACT, parent_hash, UiPanelContract)
+        panels = list(value) if field in {"ui_panels", "surfaces.ui_panels"} else list(parent_contract.panels)
+        if field == "ui_panel_contract_hash":
+            panel = str(value)
+            panels = [item for item in panels if item != panel]
+            panels.insert(0, panel)
+        elif field not in {"ui_panels", "surfaces.ui_panels"}:
+            return {field: value}
+        new_hash = self.blob_store.put(BlobKind.UI_PANEL_CONTRACT, UiPanelContract(panels=panels, notes=parent_contract.notes))
+        return {"ui_panel_contract_hash": new_hash, "surfaces.ui_panels": panels}
+
+    def _realize_budget_policy_edit(self, parent: HarnessModule, field: str, value: Any) -> dict[str, Any]:
+        parent_hash = self._required_parent_ref(parent.budget_policy_hash, BlobKind.BUDGET_POLICY)
+        parent_budget = self.blob_store.get_typed(BlobKind.BUDGET_POLICY, parent_hash, BudgetPolicyBlob)
+        max_tool_calls = int(value["max_tool_calls"] if isinstance(value, dict) and "max_tool_calls" in value else value)
+        if max_tool_calls > parent_budget.max_tool_calls:
+            raise ValueError("budget tighten cannot increase max_tool_calls")
+        new_budget = parent_budget.model_copy(update={"max_tool_calls": max_tool_calls})
+        new_hash = self.blob_store.put(BlobKind.BUDGET_POLICY, new_budget)
+        return {"budget_policy_hash": new_hash, "surfaces.budget": {"max_tool_calls": max_tool_calls}}
+
+    def _realize_safety_policy_edit(self, parent: HarnessModule, field: str, value: Any) -> dict[str, Any]:
+        parent_hash = self._required_parent_ref(parent.safety_policy_hash, BlobKind.SAFETY_POLICY)
+        parent_safety = self.blob_store.get_typed(BlobKind.SAFETY_POLICY, parent_hash, SafetyPolicyBlob)
+        updates = value if isinstance(value, dict) else {"extra_rules": {str(value): "tightened"}}
+        new_safety = parent_safety.model_copy(update=updates)
+        new_hash = self.blob_store.put(BlobKind.SAFETY_POLICY, new_safety)
+        return {"safety_policy_hash": new_hash, "surfaces.safety": new_safety.model_dump(mode="json")}
+
+    def _required_parent_ref(self, content_hash: str | None, kind: BlobKind) -> str:
+        if self.blob_store is None:
+            raise ValueError(f"blob store required for {kind.value} variation")
+        if content_hash is None or not self.blob_store.has(kind, content_hash):
+            raise ValueError(f"missing parent blob for {kind.value}: {content_hash}")
+        return content_hash
     def _requires_human_approval(
         self,
         parent: HarnessModule,

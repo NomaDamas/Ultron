@@ -82,7 +82,7 @@ def create_app() -> FastAPI:
         if cmd.type is ActionType.SUBMIT_REQUEST:
             request_text = str(cmd.payload.get("request_text", ""))
             result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text)
-            canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"server-candidate-{secrets.token_hex(8)}"}, request_text)
+            canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text)
             candidate_hash = canary["candidate"].content_hash or ""
             evaluation = engine.evaluate_and_decide(
                 candidate_hash,

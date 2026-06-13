@@ -1,6 +1,7 @@
 from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, TriageApp
 from ultron.evaluation.harness import PairedTask
 from ultron.evolution.variation import VariationPrimitive
+from ultron.module.blobs import BlobKind, PromptPack
 from ultron.registry.store import ModuleLifecycle
 
 
@@ -20,6 +21,10 @@ def test_full_triage_loop_seed_run_canary_promote_rollback_atrophy_restore():
     candidate_hash = canary["candidate"].content_hash
     assert app.canary_store.read_namespace(canary["canary_id"], "memory")
     assert app.registry.get(candidate_hash).lifecycle == ModuleLifecycle.CANDIDATE
+    assert canary["candidate"].prompt_pack_hash is not None
+    prompt_blob = app.blob_store.get(BlobKind.PROMPT_PACK, canary["candidate"].prompt_pack_hash)
+    assert isinstance(prompt_blob, PromptPack)
+    assert prompt_blob.content_hash() == canary["candidate"].prompt_pack_hash
 
     decision = app.evaluate_and_decide(
         candidate_hash,
