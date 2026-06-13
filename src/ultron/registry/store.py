@@ -165,14 +165,77 @@ def _module_identity_bytes(module: HarnessModule) -> bytes:
     ).encode("utf-8")
 
 
-def _expands_permissions(candidate: HarnessModule, parent: HarnessModule) -> bool:
-    if not set(candidate.surfaces.tools).issubset(set(parent.surfaces.tools)):
+def expands_module_permissions(candidate: HarnessModule, parent: HarnessModule) -> bool:
+    """Return True when candidate widens any permission-bearing module surface."""
+    if not _list_subset(candidate.surfaces.tools, parent.surfaces.tools):
         return True
-    if not _declared_surface_names(candidate).issubset(_declared_surface_names(parent)):
+    if not _list_subset(candidate.surfaces.ui_panels, parent.surfaces.ui_panels):
         return True
-    if not set(candidate.required_adapter_capabilities).issubset(set(parent.required_adapter_capabilities)):
+    if not _list_subset(candidate.surfaces.skill_refs, parent.surfaces.skill_refs):
         return True
-    return _persistence_rank(candidate.persistence_policy) > _persistence_rank(parent.persistence_policy)
+    if not _list_subset(candidate.skill_refs, parent.skill_refs):
+        return True
+    if candidate.surfaces.topology_fragment and candidate.surfaces.topology_fragment != parent.surfaces.topology_fragment:
+        return True
+    if not _list_subset(candidate.required_adapter_capabilities, parent.required_adapter_capabilities):
+        return True
+    if _persistence_rank(candidate.persistence_policy) > _persistence_rank(parent.persistence_policy):
+        return True
+    if _dict_widens(candidate.surfaces.persistence, parent.surfaces.persistence):
+        return True
+    if _safety_widens(candidate.surfaces.safety, parent.surfaces.safety):
+        return True
+    return _budget_widens(candidate.surfaces.budget, parent.surfaces.budget)
+
+
+_expands_permissions = expands_module_permissions
+
+
+def _list_subset(candidate: list[object], parent: list[object]) -> bool:
+    return set(candidate).issubset(set(parent))
+
+
+def _safety_widens(candidate: dict[str, object] | None, parent: dict[str, object] | None) -> bool:
+    candidate = candidate or {}
+    parent = parent or {}
+    for key in ("workspace_writes", "external_calls"):
+        if bool(candidate.get(key, False)) and not bool(parent.get(key, False)):
+            return True
+    return _dict_widens(candidate, parent, ignore={"workspace_writes", "external_calls"})
+
+
+def _budget_widens(candidate: dict[str, object] | None, parent: dict[str, object] | None) -> bool:
+    candidate = candidate or {}
+    parent = parent or {}
+    for key, value in candidate.items():
+        parent_value = parent.get(key)
+        if _is_number(value) and _is_number(parent_value):
+            if float(value) > float(parent_value):
+                return True
+        elif key not in parent and value not in (None, False, [], {}, 0):
+            return True
+        elif value != parent_value and key.lower().endswith(("cap", "limit", "max", "budget")):
+            return True
+    return False
+
+
+def _dict_widens(candidate: dict[str, object] | None, parent: dict[str, object] | None, *, ignore: set[str] | None = None) -> bool:
+    candidate = candidate or {}
+    parent = parent or {}
+    ignored = ignore or set()
+    for key, value in candidate.items():
+        if key in ignored:
+            continue
+        if key not in parent and value not in (None, False, [], {}, 0):
+            return True
+        parent_value = parent.get(key)
+        if isinstance(value, bool) and value and not bool(parent_value):
+            return True
+    return False
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _declared_surface_names(module: HarnessModule) -> set[str]:

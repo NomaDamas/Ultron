@@ -12,7 +12,7 @@ from ultron.module.contract import load_default_contract
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
 from ultron.module.blobs import BlobStore, BudgetPolicyBlob, PromptPack, SafetyPolicyBlob, ToolPolicyBlob, UiPanelContract
 from ultron.module.model import FitnessMetadata, HarnessModule, PersistencePolicy, PrivacyMetadata, PromotionState, TargetLens
-from ultron.registry.store import ModuleRegistry
+from ultron.registry.store import ModuleRegistry, expands_module_permissions
 from ultron.ui.generator import LiveModelUnavailable, ModelProvider
 
 
@@ -142,7 +142,7 @@ def validate_synthesized_module(
     candidate = module.finalized()
     ModuleSurfaceContract.validated(candidate.surfaces.model_dump(), adapter_contract)
     candidate.validate_surfaces(adapter_contract)
-    if parent is not None and _expands_permissions(candidate, parent):
+    if parent is not None and expands_module_permissions(candidate, parent):
         raise PermissionError("synthesized module requires human approval for permission expansion")
     if registry is not None and parent is not None and not registry.can_auto_promote(candidate):
         raise PermissionError("synthesized module is not auto-promotable")
@@ -179,18 +179,6 @@ def _bounded_budget(parent: dict[str, Any] | None, allowed: dict[str, Any] | Non
     return {"max_tool_calls": max(1, min(parent_max, allowed_max))}
 
 
-def _expands_permissions(candidate: HarnessModule, parent: HarnessModule) -> bool:
-    if not set(candidate.surfaces.tools).issubset(set(parent.surfaces.tools)):
-        return True
-    if not set(candidate.surfaces.skill_refs).issubset(set(parent.surfaces.skill_refs)):
-        return True
-    if candidate.surfaces.topology_fragment and candidate.surfaces.topology_fragment != parent.surfaces.topology_fragment:
-        return True
-    return _persistence_rank(candidate.persistence_policy) > _persistence_rank(parent.persistence_policy)
-
-
-def _persistence_rank(policy: PersistencePolicy) -> int:
-    return {PersistencePolicy.READ_ONLY: 0, PersistencePolicy.ISOLATED: 1, PersistencePolicy.NORMAL: 2}[policy]
 
 
 def _prompt_text(context: SynthesisContext, slot: str) -> str:

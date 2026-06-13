@@ -47,6 +47,14 @@ def create_app() -> FastAPI:
     async def validation_exception_handler(request: Any, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
+    @app.exception_handler(LiveHermesUnavailable)
+    async def live_hermes_unavailable_handler(request: Any, exc: LiveHermesUnavailable) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": f"live Hermes unavailable: {exc}"})
+
+    @app.exception_handler(LiveModelUnavailable)
+    async def live_model_unavailable_handler(request: Any, exc: LiveModelUnavailable) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": f"live model unavailable: {exc}"})
+
     @app.get("/", response_class=HTMLResponse)
     def index(response: Response) -> str:
         session_token = session_store.create_session(DEFAULT_LOCAL_PRINCIPAL, SESSION_TTL_SECONDS)

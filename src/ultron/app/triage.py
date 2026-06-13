@@ -705,18 +705,20 @@ class TriageApp:
     def _validate_live_adapter_result(self, result: AdapterRunResult) -> None:
         if not self.adapter.is_live:
             return
-        denylist = {"stub", "fake", "fake-deterministic"}
+        denylist = ("stub", "fake")
         snapshot = result.model_snapshot
-        snapshot_provider = str(snapshot.get("provider", "")).lower()
-        result_provider = result.model_provider.lower()
-        if snapshot_provider in denylist or result_provider in denylist:
-            raise ValueError("live Hermes adapter returned denied stub/fake provider")
-        snapshot_name = str(snapshot.get("name", "")).lower()
-        result_name = result.model_name.lower()
-        if "stub" in snapshot_name or "fake" in snapshot_name:
-            raise ValueError("live Hermes adapter returned denied stub/fake snapshot name")
-        if "stub" in result_name or "fake" in result_name:
-            raise ValueError("live Hermes adapter returned denied stub/fake model name")
+        provider_fields = [
+            result.model_provider,
+            snapshot.get("provider", ""),
+            snapshot.get("runner_provider", ""),
+        ]
+        for provider in provider_fields:
+            if any(marker in str(provider).lower() for marker in denylist):
+                raise ValueError("live Hermes adapter returned denied stub/fake provider")
+        name_fields = [result.model_name, snapshot.get("name", ""), snapshot.get("runner_name", "")]
+        for name in name_fields:
+            if any(marker in str(name).lower() for marker in denylist):
+                raise ValueError("live Hermes adapter returned denied stub/fake model name")
         if snapshot.get("stub") or snapshot.get("is_stub") or snapshot.get("fake"):
             raise ValueError("live Hermes adapter returned stub/fake snapshot marker")
         if result.model_provider != self.adapter.provider_id:

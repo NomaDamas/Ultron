@@ -40,7 +40,6 @@ class SubprocessHermesRunner:
     """Real Hermes runner using the pinned hermes-agent integration seams."""
 
     def run_plan(self, plan: HermesInvocationPlan, isolated_root: str) -> RunnerResult:
-        modules = self._import_hermes()
         root = Path(isolated_root).resolve()
         home = root / "home"
         workspace = root / "workspace"
@@ -50,11 +49,13 @@ class SubprocessHermesRunner:
 
         old_home = os.environ.get("HOME")
         old_cwd = Path.cwd()
+        os.environ["HOME"] = str(home)
+        os.chdir(workspace)
+        modules: dict[str, Any] | None = None
         started = time.monotonic()
         trajectory_id = uuid.uuid4().hex
         try:
-            os.environ["HOME"] = str(home)
-            os.chdir(workspace)
+            modules = self._import_hermes()
             budget = self._build_budget(modules["budget"], plan.iteration_budget)
             toolset = self._build_toolset(modules["toolsets"], plan.hermes_tool_allowlist, workspace)
             result = modules["conversation"].run_conversation(

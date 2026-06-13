@@ -12,6 +12,12 @@ from ultron.module.model import PersistencePolicy
 from ultron.synthesis.module_synthesizer import LiveModelModuleSynthesizer, SynthesisContext, SynthesisPolicyConstraints
 from ultron.ui.generator import LiveModelUiSpecGenerator, LiveModelUnavailable, UiGenContext
 from ultron.ui.runtime import ComponentType
+from ultron.registry.store import ModuleLifecycle, ModuleRegistry
+
+try:
+    from fastapi.testclient import TestClient
+except ModuleNotFoundError:  # pragma: no cover
+    TestClient = None
 
 
 class FakeHermesRunner:
@@ -86,6 +92,26 @@ def test_subprocess_runner_without_hermes_agent_fails_closed(tmp_path):
         SubprocessHermesRunner().run_plan(PinnedHermesAdapter().build_invocation_plan(_request()), str(tmp_path))
 
 
+def test_subprocess_runner_isolates_home_and_cwd_before_import(monkeypatch, tmp_path):
+    original_home = os.environ.get("HOME")
+    original_cwd = os.getcwd()
+    observed = {}
+
+    def blocked_import(name, package=None):
+        observed.setdefault("home", os.environ.get("HOME"))
+        observed.setdefault("cwd", os.getcwd())
+        raise ImportError(name)
+
+    monkeypatch.setattr("ultron.hermes.runner.importlib.import_module", blocked_import)
+    with pytest.raises(LiveHermesUnavailable, match="hermes-agent not installed"):
+        SubprocessHermesRunner().run_plan(PinnedHermesAdapter().build_invocation_plan(_request()), str(tmp_path))
+
+    assert observed["home"] == str((tmp_path / "home").resolve())
+    assert observed["cwd"] == str((tmp_path / "workspace").resolve())
+    assert os.environ.get("HOME") == original_home
+    assert os.getcwd() == original_cwd
+
+
 class FakeModelProvider:
     def __init__(self, payload):
         self.payload = payload
@@ -136,11 +162,52 @@ def test_live_module_synth_rejects_permission_expansion_and_tampered_hash():
         LiveModelModuleSynthesizer(FakeModelProvider(tampered.model_dump(mode="json"))).synthesize(context)
 
 
+def test_safety_and_budget_expansion_requires_human_approval_in_synthesis_and_registry():
+    app = TriageApp()
+    parent = app.seed_baseline()
+    constraints = SynthesisPolicyConstraints(allowed_surfaces=parent.surfaces)
+    context = SynthesisContext(request_text="synth", workflow_fingerprint=DEFAULT_WORKFLOW, parent_module=parent, policy_constraints=constraints)
+    registry = ModuleRegistry()
+    registry.register(parent, ModuleLifecycle.SEED, "tenant")
+
+    expansions = [
+        parent.surfaces.model_copy(update={"safety": {**(parent.surfaces.safety or {}), "workspace_writes": True}}),
+        parent.surfaces.model_copy(update={"safety": {**(parent.surfaces.safety or {}), "external_calls": True}}),
+        parent.surfaces.model_copy(update={"budget": {**(parent.surfaces.budget or {}), "max_tool_calls": int((parent.surfaces.budget or {}).get("max_tool_calls", 1)) + 1}}),
+    ]
+    for surfaces in expansions:
+        expanded = parent.model_copy(deep=True, update={"version": parent.version + 1, "parent_id": parent.content_hash, "surfaces": surfaces, "content_hash": None}).finalized()
+        registry.register(expanded, ModuleLifecycle.CANDIDATE, "tenant")
+        assert registry.can_auto_promote(expanded.content_hash) is False
+        with pytest.raises(PermissionError, match="permission expansion"):
+            LiveModelModuleSynthesizer(FakeModelProvider(expanded.model_dump(mode="json"))).synthesize(context)
+
+
 def test_http_provider_missing_env_fails_closed(monkeypatch):
     for key in ["ULTRON_MODEL_BASE_URL", "ULTRON_MODEL_API_KEY", "ULTRON_MODEL_NAME"]:
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(LiveModelUnavailable):
         HttpModelProvider().complete("prompt", None)
+
+
+def test_uispec_live_model_unavailable_returns_503_not_stub_or_500(monkeypatch):
+    if TestClient is None:
+        pytest.skip("fastapi test client unavailable")
+    for key in ["ULTRON_MODEL_BASE_URL", "ULTRON_MODEL_API_KEY", "ULTRON_MODEL_NAME"]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ULTRON_ADAPTER", "fake")
+    monkeypatch.setenv("ULTRON_UI_GENERATOR", "model")
+    monkeypatch.setenv("ULTRON_MODULE_SYNTH", "fake")
+
+    from ultron.app.server import create_app
+
+    response = TestClient(create_app()).get("/api/uispec")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert "live model unavailable" in body["detail"]
+    assert "ULTRON_MODEL_BASE_URL" in body["detail"]
+    assert "components" not in body
 
 
 def test_env_config_defaults_fake_and_live_components(monkeypatch):
@@ -156,6 +223,37 @@ def test_env_config_defaults_fake_and_live_components(monkeypatch):
     assert live.adapter.is_live
     with pytest.raises(LiveModelUnavailable):
         live.ui_generator.generate(UiGenContext(module_set_manifest=object(), request_class="triage", allowed_registry=[ComponentType.PLAN_PANEL]))
+
+
+def test_live_adapter_rejects_stub_fake_provider_substrings():
+    class ProviderRunner(FakeHermesRunner):
+        def __init__(self, provider, snapshot_provider):
+            self.calls = []
+            self.provider = provider
+            self.snapshot_provider = snapshot_provider
+
+        def run_plan(self, plan, isolated_root):
+            return RunnerResult(
+                trajectory_id="provider-substring",
+                trajectory_path=f"{isolated_root}/trajectory.json",
+                output={"plan": ["reject"], "risk": [], "tests": []},
+                tool_calls=1,
+                measured_guardrails={"cost": 0, "latency_ms": 1, "tool_calls": 1},
+                model_provider=self.provider,
+                model_name="gpt-live",
+                model_snapshot={"provider": self.snapshot_provider, "name": "gpt-live"},
+            )
+
+    for provider in ["fake-openai", "openai-stub"]:
+        app = TriageApp(adapter=PinnedHermesAdapter(ProviderRunner(provider, "openai-compatible")))
+        app.seed_baseline()
+        with pytest.raises(ValueError, match="stub/fake provider"):
+            app.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "provider substring must reject")
+
+    app = TriageApp(adapter=PinnedHermesAdapter(ProviderRunner("hermes-pinned-ee1a744", "openai-compatible")))
+    bad_snapshot = app.adapter.run(_request()).model_copy(update={"model_snapshot": {"provider": "fake-openai", "name": "gpt-live"}})
+    with pytest.raises(ValueError, match="stub/fake provider"):
+        app._validate_live_adapter_result(bad_snapshot)
 
 
 @pytest.mark.skipif(os.getenv("ULTRON_LIVE_HERMES") != "1", reason="ULTRON_LIVE_HERMES=1 not set")
