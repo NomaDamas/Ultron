@@ -27,7 +27,7 @@ from ultron.registry.store import ModuleLifecycle, ModuleRegistry
 from ultron.run.manifest import RunManifest
 from ultron.persistence.db import Database
 from ultron.persistence.sqlite_stores import SqliteActivePointerStore, SqliteBlobStore, SqliteEvaluatedCandidateStore, SqliteFeedbackChannel, SqliteModuleRegistry, SqliteSideEffectLedger
-from ultron.run.signer import FixtureKeyProvider, ManifestSigner
+from ultron.run.signer import EnvKeyProvider, FixtureKeyProvider, ManifestSigner
 from ultron.ui.runtime import ComponentType, UiSpec, build_uispec_from_manifest
 
 
@@ -49,7 +49,7 @@ class TriageApp:
         self.adapter_contract = load_default_contract()
         self.blob_store = BlobStore()
         self.registry = ModuleRegistry(self.blob_store)
-        self.manifest_signer: ManifestSigner | None = None
+        self.manifest_signer: ManifestSigner | None = ManifestSigner.from_provider("fixture-dev", FixtureKeyProvider({"fixture-dev": "ultron-dev-run-manifest-key"}))
 
         self.pointer_store = ActivePointerStore()
         self.resolver = CompositionResolver(self.registry, self.adapter_contract)
@@ -183,6 +183,8 @@ class TriageApp:
         self._validate_live_adapter_result(result)
         if should_bootstrap_pointer:
             self.pointer_store.swap((user_scope, workflow_fingerprint), 0, active)
+        if self.manifest_signer is None:
+            raise ValueError("run manifest signing requires an explicit signer")
         run_manifest = RunManifest.from_manifest_set(
             manifest,
             run_id=run_id,
@@ -197,21 +199,7 @@ class TriageApp:
             timestamp_source="server",
             persistence_mode=PersistencePolicy.ISOLATED,
             resolved_ui_spec_hash=ui_spec.spec_hash,
-        ).sign(signer=self.manifest_signer) if self.manifest_signer is not None else RunManifest.from_manifest_set(
-            manifest,
-            run_id=run_id,
-            session_id=session_id,
-            active_module_set_id=active_module_set_id,
-            hermes_version=self.frozen_versions.hermes_version,
-            adapter_version=self.frozen_versions.adapter_version,
-            contract_version=self.frozen_versions.contract_version,
-            model_snapshot=self._validated_model_snapshot(result),
-            side_effect_ledger_id="in-memory-ledger",
-            created_at=time.time(),
-            timestamp_source="server",
-            persistence_mode=PersistencePolicy.ISOLATED,
-            resolved_ui_spec_hash=ui_spec.spec_hash,
-        ).sign()
+        ).sign(signer=self.manifest_signer)
         result_payload = result.model_dump(mode="json")
         for module_hash in manifest.ordered_module_hashes:
             self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", module_hash, None, SideEffectKind.ADAPTER_STATE, result_payload)
@@ -290,6 +278,8 @@ class TriageApp:
             run_id="canary-pointer",
             module_set_hash=candidate_hash,
         )
+        if self.manifest_signer is None:
+            raise ValueError("run manifest signing requires an explicit signer")
         run_manifest = RunManifest.from_manifest_set(
             manifest,
             run_id=run_id,
@@ -307,24 +297,7 @@ class TriageApp:
             variation_primitive_id=proposal.primitive.value,
             canary_id=canary_id,
             resolved_ui_spec_hash=ui_spec.spec_hash,
-        ).sign(signer=self.manifest_signer) if self.manifest_signer is not None else RunManifest.from_manifest_set(
-            manifest,
-            run_id=run_id,
-            session_id=session_id,
-            active_module_set_id=active_module_set_id,
-            hermes_version=self.frozen_versions.hermes_version,
-            adapter_version=self.frozen_versions.adapter_version,
-            contract_version=self.frozen_versions.contract_version,
-            model_snapshot=self._validated_model_snapshot(result),
-            side_effect_ledger_id="in-memory-ledger",
-            created_at=time.time(),
-            timestamp_source="server",
-            persistence_mode=PersistencePolicy.ISOLATED,
-            candidate_module_id=candidate_hash,
-            variation_primitive_id=proposal.primitive.value,
-            canary_id=canary_id,
-            resolved_ui_spec_hash=ui_spec.spec_hash,
-        ).sign()
+        ).sign(signer=self.manifest_signer)
         result_payload = result.model_dump(mode="json")
         self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", candidate_hash, canary_id, SideEffectKind.ADAPTER_STATE, result_payload)
         self.last_candidate_hash = candidate_hash
@@ -413,9 +386,25 @@ class TriageApp:
         target = module_hash or (active[-1] if active else None)
         if target is None:
             raise ValueError("no active module to prune")
-        pruned = self.evolution_loop.prune(target, is_critical_seed=(target == active[0]), approved=True)
-        restore_version, _ = self.pointer_store.get(self.pointer_key)
-        restored = self.evolution_loop.restore(target, DEFAULT_SCOPE, DEFAULT_WORKFLOW, restore_version)
+        if isinstance(self.pointer_store, SqliteActivePointerStore) and isinstance(self.registry, SqliteModuleRegistry) and isinstance(self.ledger, SqliteSideEffectLedger):
+            from ultron.persistence.unit_of_work import PromotionUnitOfWork
+            uow = PromotionUnitOfWork(self.pointer_store.db, self.registry, self.pointer_store, self.ledger)
+            pruned_active = [h for h in active if h != target]
+            pruned = uow.prune(target, version, pruned_active, uuid.uuid4().hex, "triage-app", key=self.pointer_key) is not None
+            restore_version, restore_active = self.pointer_store.get(self.pointer_key)
+            restored_active = list(restore_active)
+            if target not in restored_active:
+                restored_active.append(target)
+            pruned_hashes: list[str] = []
+            while len(restored_active) > self.evolution_loop.controls.active_module_cap:
+                evict = restored_active[0] if restored_active[0] != target else restored_active[1]
+                restored_active.remove(evict)
+                pruned_hashes.append(evict)
+            restored = uow.restore(target, restore_version, restored_active, uuid.uuid4().hex, "triage-app", key=self.pointer_key, pruned_hashes=pruned_hashes) is not None
+        else:
+            pruned = self.evolution_loop.prune(target, is_critical_seed=(target == active[0]), approved=True)
+            restore_version, _ = self.pointer_store.get(self.pointer_key)
+            restored = self.evolution_loop.restore(target, DEFAULT_SCOPE, DEFAULT_WORKFLOW, restore_version)
         return {"module_hash": target, "pruned": pruned, "restored": restored}
 
     def _build_adapter_request(
@@ -484,12 +473,18 @@ class TriageApp:
     def _append_ledger(self, run_id: str, module_set_hash: str, module_hash: str | None, canary_id: str | None, kind: SideEffectKind, payload: dict[str, Any]) -> None:
         self.ledger.append(LedgerEntry(run_id=run_id, module_set_hash=module_set_hash, module_hash=module_hash, canary_id=canary_id, kind=kind, payload=payload))
 
-def build_durable_triage_app(db_path: str, *, signer: ManifestSigner | None = None) -> TriageApp:
-    """Build a TriageApp backed by SQLite stores.
+def build_durable_triage_app(db_path: str, *, signer: ManifestSigner | None = None, key_id: str = "prod") -> TriageApp:
+    """Build a TriageApp backed by SQLite stores with explicit production signing."""
+    return _build_durable_triage_app(db_path, signer=signer or ManifestSigner.from_provider(key_id, EnvKeyProvider()))
 
-    The default signer is fixture/dev-only so tests and local demos remain explicit; production callers
-    should pass a ManifestSigner sourced from EnvKeyProvider or another closed key provider.
-    """
+
+def build_durable_triage_app_for_tests(db_path: str, *, signer: ManifestSigner | None = None) -> TriageApp:
+    """Build a durable app with an explicit fixture signer for tests and local fixtures only."""
+    fixture_signer = signer or ManifestSigner.from_provider("fixture-dev", FixtureKeyProvider({"fixture-dev": "ultron-dev-run-manifest-key"}))
+    return _build_durable_triage_app(db_path, signer=fixture_signer)
+
+
+def _build_durable_triage_app(db_path: str, *, signer: ManifestSigner) -> TriageApp:
     app = TriageApp()
     db = Database(db_path)
     blob_store = SqliteBlobStore(db)
@@ -513,5 +508,5 @@ def build_durable_triage_app(db_path: str, *, signer: ManifestSigner | None = No
     )
     app.feedback_channel = SqliteFeedbackChannel(db)
     app.evaluated_candidates = SqliteEvaluatedCandidateStore(db)
-    app.manifest_signer = signer or ManifestSigner.from_provider("fixture-dev", FixtureKeyProvider({"fixture-dev": "ultron-dev-run-manifest-key"}))
+    app.manifest_signer = signer
     return app

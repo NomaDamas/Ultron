@@ -1,45 +1,46 @@
 ## Summary
-GAP2 implements real canonical content addressing for the blob models and the baseline seed path is blob-backed. Approval is blocked because the registry still accepts non-64-hex legacy artifact references whenever a BlobStore is present, and current product canary paths still create new modules through that bypass.
+GAP3 is not ready to approve. SQLite persistence is real for the main durable flow and the promote unit-of-work uses one SQLite transaction, but key safety requirements remain unmet: production signing can still use a source-controlled dev key, durable prune and restore bypass the ledgered unit-of-work, and the SQLite ledger mutates historical rows for quarantine.
 
 ## Analysis
-Content addressing is real for the new blob primitives. src/ultron/module/blobs.py:24-33 serializes model JSON with sort_keys=True and hashes canonical bytes with sha256. src/ultron/module/blobs.py:73-83 keys BlobStore entries by kind and content hash, treats repeated puts of equivalent content as idempotent, guards same-hash byte collisions, deep-copies on put, and deep-copies on get.
+Durability is substantially implemented. `src/ultron/persistence/db.py:14-70` opens a SQLite database, enables foreign keys, attempts WAL, wraps writes in `BEGIN IMMEDIATE`, and runs idempotent v1 schema creation. `src/ultron/persistence/sqlite_stores.py:20-175` persists blobs and modules with content-hash collision checks, and `sqlite_stores.py:180-295` persists active pointers, ledger entries, feedback, and evaluated candidates. `tests/test_gap3_durable.py:25-45` proves restart persistence for registry, pointer, ledger, evaluated-candidate evidence, and blobs across a fresh durable app instance.
 
-Blob-backed module construction is wired. src/ultron/module/model.py:123-142 writes prompt, tool, UI, safety, and budget blobs before assigning the five hash fields, and src/ultron/module/model.py:144-152 returns those references for registry verification. src/ultron/app/triage.py:51-53 constructs one BlobStore-backed registry, and src/ultron/app/triage.py:109-134 seeds the baseline through HarnessModule.create_with_blobs.
+Atomic promote is implemented at the immediate unit-of-work boundary. `src/ultron/persistence/unit_of_work.py:20-47` updates lifecycle, performs pointer CAS, and appends a `POINTER_TRANSITION` ledger entry inside one `Database.tx`; `tests/test_gap3_durable.py:57-73` proves stale CAS rolls back lifecycle, pointer, and ledger count. However, product durable prune and restore do not use this boundary: `src/ultron/app/triage.py:410-418` calls `EvolutionLoop.prune` and `EvolutionLoop.restore`, while `src/ultron/evolution/loop.py:115-158` performs pointer swaps and lifecycle updates as separate operations and does not append ledger entries. `PromotionUnitOfWork.prune` and `restore` exist at `unit_of_work.py:23-27`, but the durable app path does not call them.
 
-The strict registry path works only for sha-shaped values. src/ultron/registry/store.py:132-143 rejects missing 64-hex references and rehashes stored blob content to detect mismatches. tests/test_gap2_blobs.py:80-93 covers the complete, missing, and tampered 64-hex cases.
+Append-only and immutability are mixed. Blob and module content-addressed writes are protected by primary keys and collision checks in `src/ultron/persistence/sqlite_stores.py:31-58` and `sqlite_stores.py:97-125`. Ledger appends use `INSERT` in `sqlite_stores.py:213-224`, but quarantine uses `UPDATE ledger SET quarantined = 1` in `sqlite_stores.py:232-235`, which violates the stated no UPDATE/DELETE historical-row requirement for the SQLite ledger.
 
-The compatibility carve-out is too broad. src/ultron/registry/store.py:136-137 skips every non-64-hex reference instead of limiting old placeholders to a fixture-only or no-BlobStore path. This is observable in current product flows: src/ultron/app/server.py:84-85 generates canaries with placeholder prompt_pack_hash values, src/ultron/app/triage.py:233-253 registers those candidates through the blob-backed registry, and tests/test_g007_app.py:19 and :37 expect candidate-good and candidate-bad to register.
+Manifest signing is only partially fail-closed. `src/ultron/run/signer.py:31-53` makes `EnvKeyProvider` fail when no secret exists, and `signer.py:58-62` rejects the wrong key id. `tests/test_gap3_durable.py:108-123` covers env failure, key-id recording, verification, wrong-key rejection, and tamper rejection. But `src/ultron/run/manifest.py:16` still defines a source-controlled `DEFAULT_RUN_MANIFEST_SIGNING_KEY`, `manifest.py:68-81` still signs and verifies with that default when no signer is supplied, and `src/ultron/app/triage.py:487-516` makes the durable app default to a fixture signer backed by the same dev key. There is no production guard that requires a real provider-sourced key.
 
-Module identity remains deterministic and excludes runtime fitness. src/ultron/module/model.py:93-111 excludes content_hash and fitness from identity_fields, dumps JSON mode, sorts keys, and hashes deterministic JSON. tests/test_gap2_blobs.py:96-110 checks stable module hashes across stores and unchanged identity after a fitness change.
+The in-memory default path remains the default `TriageApp` path and the recorded QA artifact reports `230 passed, 3 skipped` in `artifacts/gap3-qa.txt`. Durable promotion mirrors evidence gating through `TriageApp.approve_promotion` before invoking the unit-of-work at `src/ultron/app/triage.py:363-391`, but durable prune/restore and ledger append-only semantics do not mirror the required invariants.
+
+WAL and migrations are acceptable for an initial v1 store but carry watch risk. `db.py:24-32` attempts WAL best-effort and `db.py:65-120` creates versioned schema tables idempotently and rejects newer schemas. `tests/test_gap3_durable.py:48-54` covers two-connection stale CAS, but no test asserts the journal mode, lock retry behavior, feedback restart, or mid-failure rollback after pointer update but before ledger append.
 
 ## Root Cause
-Legacy scalar placeholder compatibility is implemented as a silent skip in the production blob verification boundary. That makes content-addressed verification optional for any new module that chooses a non-sha string.
+GAP3 added durable store implementations but left two critical contracts optional instead of enforcing them at product boundaries. Signing has a fail-closed provider class, but the manifest and durable app still expose default dev-key signing; lifecycle transitions have a transaction helper, but only promotion is wired through it while prune and restore still use the older non-ledgered evolution loop path.
 
 ## Findings
-1. HIGH - src/ultron/registry/store.py:132-143 - Non-64-hex artifact references bypass verification even when the registry has a BlobStore. Impact: blob-backed modules can register forged or unmaterialized prompt, tool, UI, safety, or budget refs. Fix: reject non-sha refs by default when blob_store is present; keep legacy only behind an explicit test or migration mode, or only for registries without BlobStore.
-2. HIGH - src/ultron/app/server.py:84-85 and src/ultron/app/triage.py:233-253 - New canary/product modules still use scalar placeholder prompt_pack_hash values. Impact: strict GAP2 enforcement would break current product paths, proving the bypass is active outside old fixtures. Fix: create real PromptPack blobs for candidate prompt edits or require variation payloads to supply blob content that is stored before registration.
-3. MEDIUM - src/ultron/module/blobs.py:73-83 - BlobStore does not enforce a BlobKind to blob model type mapping, and registry verification does not call get_typed. Impact: the hash can be valid while the stored blob type is wrong for the referenced field. Fix: enforce kind/type compatibility on put or in registry verification.
-4. LOW - tests/test_gap2_blobs.py:80-93 - Tests do not cover non-sha rejection under ModuleRegistry(BlobStore()). Impact: the principal bypass remains normalized by older G007 tests. Fix: add regression coverage for rejecting candidate-good style refs in a blob-backed registry unless explicit legacy mode is enabled.
+1. HIGH - `src/ultron/run/manifest.py:16`, `src/ultron/run/manifest.py:68-81`, `src/ultron/app/triage.py:487-516` - Production can still sign manifests with a source-controlled default key by omitting a signer, and the durable factory installs a fixture signer by default. Impact: the manifest signing requirement is not fail-closed for production. Fix: remove default-key signing from production APIs, require an explicit `ManifestSigner` or environment-backed provider for durable/production construction, and keep fixture keys only in tests or an explicit dev-only factory.
+2. HIGH - `src/ultron/app/triage.py:410-418`, `src/ultron/evolution/loop.py:115-158`, `src/ultron/persistence/unit_of_work.py:23-27` - Durable prune and restore bypass `PromotionUnitOfWork` and are neither ledgered nor atomic as one pointer plus lifecycle plus ledger transaction. Impact: stale CAS or a mid-operation failure can leave unledgered or half-applied durable state, and STATE-02 is satisfied only for promote. Fix: route durable prune and restore through a transaction boundary that performs lifecycle, pointer CAS, and ledger append together; add stale and injected-failure tests for promote, prune, and restore.
+3. HIGH - `src/ultron/persistence/sqlite_stores.py:213-235` - SQLite ledger quarantine mutates existing ledger rows with `UPDATE`, despite the explicit append-only and no UPDATE/DELETE historical-row requirement. Impact: the audit trail cannot prove the original row state and the quarantine decision as separate immutable facts. Fix: append quarantine/reversal ledger events or use a separate append-only quarantine table and derive promotability without updating historical ledger rows.
+4. MEDIUM - `tests/test_gap3_durable.py:25-45`, `src/ultron/persistence/sqlite_stores.py:242-275` - Feedback has a SQLite store, but the restart test never submits and reloads feedback. Impact: STATE-01 feedback durability is implemented but not proved by the GAP3 tests. Fix: add a restart test that calls `submit_feedback`, reopens the app, and reads the event through `events_for_candidate` or another durable query.
+5. MEDIUM - `tests/test_gap3_durable.py:57-73`, `src/ultron/persistence/unit_of_work.py:31-47` - Atomic rollback testing covers stale CAS only, not failure after pointer update and before ledger append. Impact: the most important mid-transaction rollback path is inferred from SQLite behavior rather than protected by regression coverage. Fix: inject a duplicate ledger entry id or failing ledger append inside the transaction and assert pointer, lifecycle, and ledger remain unchanged.
+6. LOW - `src/ultron/persistence/db.py:24-32`, `src/ultron/persistence/db.py:65-120` - WAL is best-effort and migrations are v1 idempotent, but there is no assertion/test of actual journal mode or future stepwise migration behavior. Impact: low current risk, higher upgrade risk. Fix: assert WAL for file-backed DBs where supported and add migration-version tests before introducing v2.
 
 ## Recommendations
-1. Block GAP2 approval until blob-backed registries reject non-sha artifact refs by default.
-2. Update variation and server canary generation to store real blobs, not placeholder scalar hashes.
-3. Make the legacy bridge explicit and bounded to old fixtures or migration-only registries.
-4. Add kind/type enforcement for blobs before treating typed artifacts as a hard product invariant.
+1. Block GAP3 approval until production manifest signing cannot fall back to the source-controlled dev key.
+2. Centralize all durable lifecycle transitions in a ledgered SQLite unit-of-work and wire product prune and restore through it.
+3. Replace mutable ledger quarantine with an append-only quarantine event model.
+4. Add missing restart and rollback regression tests for feedback durability, prune/restore atomicity, and mid-transaction failure.
+5. Keep the current blob/module immutable storage and promote transaction structure; those pieces are directionally correct.
 
 ## Architectural Status
-BLOCK
-
-## Product Status
-BLOCK
-
-## Code Status
 BLOCK
 
 ## Code Review Recommendation
 REQUEST CHANGES
 
 ## Trade-offs
-- Strict rejection gives a clear content-addressed invariant and catches regressions early, but requires updating legacy tests and canary payload shape.
-- Explicit legacy mode preserves older placeholder fixtures with low churn, but production TriageApp and server paths must never enable it.
-- Keeping the current skip avoids churn but defeats the core GAP2 guarantee for new blob-backed modules.
+- Require explicit production signer: strongest fail-closed behavior and simplest audit story; tests need a fixture-only construction path.
+- Keep default signer with documentation: lowest churn, but it leaves production one omitted argument away from shared-key signing and does not satisfy the requirement.
+- Event-sourced quarantine: immutable audit trail and clean append-only semantics; queries become slightly more complex because promotability must join or fold quarantine events.
+- Mutable quarantine flag: simple query path, but it violates the stated ledger integrity model.
+- Transaction helper for all transitions: clearer durable boundary and testability; requires EvolutionLoop or TriageApp to separate transition planning from transition commit.

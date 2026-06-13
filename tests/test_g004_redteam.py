@@ -6,6 +6,11 @@ from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind, SideEf
 from ultron.module.model import PersistencePolicy
 from ultron.registry.pointer import ActivePointerStore
 from ultron.run.manifest import RunManifest
+from ultron.run.signer import FixtureKeyProvider, ManifestSigner
+
+
+SIGNER = ManifestSigner.from_provider("redteam", FixtureKeyProvider({"redteam": "redteam-secret"}))
+WRONG_SIGNER = ManifestSigner.from_provider("wrong-redteam", FixtureKeyProvider({"wrong-redteam": "wrong-redteam-secret"}))
 
 
 ATTACK_NAMESPACES = ("memory", "skills", "ui_cache", "adapter_state")
@@ -77,7 +82,7 @@ def _entry(
 
 
 def test_run_manifest_signature_rejects_field_tampering_wrong_key_and_is_deterministic():
-    signed = _manifest().sign("redteam-secret")
+    signed = _manifest().sign(signer=SIGNER)
 
     tampered_cases = {
         "created_at": signed.model_copy(update={"created_at": signed.created_at + 0.001}),
@@ -99,13 +104,13 @@ def test_run_manifest_signature_rejects_field_tampering_wrong_key_and_is_determi
         "persistence_mode": signed.model_copy(update={"persistence_mode": PersistencePolicy.NORMAL}),
     }
 
-    assert signed.verify("redteam-secret") is True
-    assert signed.verify("wrong-redteam-secret") is False
+    assert signed.verify(signer=SIGNER) is True
+    assert signed.verify(signer=WRONG_SIGNER) is False
     for test_id, tampered in tampered_cases.items():
-        assert tampered.verify("redteam-secret") is False, test_id
+        assert tampered.verify(signer=SIGNER) is False, test_id
 
-    assert _manifest().sign("redteam-secret").signature == signed.signature
-    assert _manifest().sign("redteam-secret").canonical_payload() == signed.canonical_payload()
+    assert _manifest().sign(signer=SIGNER).signature == signed.signature
+    assert _manifest().sign(signer=SIGNER).canonical_payload() == signed.canonical_payload()
 
 
 def test_side_effect_ledger_keeps_all_entries_and_quarantine_only_blocks_promotion():

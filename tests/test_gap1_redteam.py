@@ -95,6 +95,6 @@ def test_non_live_default_e2e_unaffected():
     app = TriageApp()
     run = app.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "non-live ok")
     canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "non-live-candidate"})
-    assert run["run_manifest"].verify()
-    assert canary["run_manifest"].verify()
+    assert run["run_manifest"].verify(signer=app.manifest_signer)
+    assert canary["run_manifest"].verify(signer=app.manifest_signer)
     assert app.canary_active(canary["canary_id"])

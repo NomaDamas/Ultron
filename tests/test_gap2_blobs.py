@@ -137,7 +137,7 @@ def test_seed_baseline_is_blob_backed_and_start_run_end_to_end():
         assert app.blob_store.get(kind, content_hash).content_hash() == content_hash
 
     result = app.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "Fix a flaky test")
-    assert result["run_manifest"].verify()
+    assert result["run_manifest"].verify(signer=app.manifest_signer)
     assert result["adapter_result"].output
 
 

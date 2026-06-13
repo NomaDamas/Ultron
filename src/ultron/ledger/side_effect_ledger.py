@@ -21,6 +21,7 @@ class SideEffectKind(StrEnum):
     EXTERNAL_CALL = "EXTERNAL_CALL"
     FEEDBACK_EVENT = "FEEDBACK_EVENT"
     TELEMETRY = "TELEMETRY"
+    QUARANTINE = "QUARANTINE"
 
 
 class LedgerEntry(BaseModel):
@@ -40,7 +41,7 @@ class LedgerEntry(BaseModel):
 
 
 class SideEffectLedger:
-    """In-memory append-only audit log; quarantine mutates flags without deletion."""
+    """In-memory append-only audit log; quarantine is derived from appended events."""
 
     def __init__(self) -> None:
         self._entries: list[LedgerEntry] = []
@@ -51,19 +52,33 @@ class SideEffectLedger:
         return stored.entry_id
 
     def entries_for_canary(self, canary_id: str) -> list[LedgerEntry]:
-        return [entry.model_copy(deep=True) for entry in self._entries if entry.canary_id == canary_id]
+        quarantined = self._quarantined_entry_ids()
+        return [entry.model_copy(update={"quarantined": entry.entry_id in quarantined}, deep=True) for entry in self._entries if entry.canary_id == canary_id and entry.kind is not SideEffectKind.QUARANTINE]
 
     def entries_for_run(self, run_id: str) -> list[LedgerEntry]:
-        return [entry.model_copy(deep=True) for entry in self._entries if entry.run_id == run_id]
+        quarantined = self._quarantined_entry_ids()
+        return [entry.model_copy(update={"quarantined": entry.entry_id in quarantined}, deep=True) for entry in self._entries if entry.run_id == run_id and entry.kind is not SideEffectKind.QUARANTINE]
 
     def mark_quarantined(self, canary_id: str) -> list[str]:
-        quarantined: list[str] = []
-        for index, entry in enumerate(self._entries):
-            if entry.canary_id == canary_id:
-                updated = entry.model_copy(update={"quarantined": True}, deep=True)
-                self._entries[index] = updated
-                quarantined.append(updated.entry_id)
+        quarantined = [entry.entry_id for entry in self._entries if entry.canary_id == canary_id and entry.kind is not SideEffectKind.QUARANTINE]
+        self._entries.append(
+            LedgerEntry(
+                run_id=f"quarantine-{canary_id}",
+                module_set_hash="quarantine",
+                canary_id=canary_id,
+                kind=SideEffectKind.QUARANTINE,
+                payload={"entry_ids": list(quarantined)},
+            )
+        )
+        return quarantined
+
+    def _quarantined_entry_ids(self) -> set[str]:
+        quarantined: set[str] = set()
+        for entry in self._entries:
+            if entry.kind is SideEffectKind.QUARANTINE:
+                quarantined.update(str(entry_id) for entry_id in entry.payload.get("entry_ids", []))
         return quarantined
 
     def promotable_entries(self) -> list[LedgerEntry]:
-        return [entry.model_copy(deep=True) for entry in self._entries if not entry.quarantined]
+        quarantined = self._quarantined_entry_ids()
+        return [entry.model_copy(deep=True) for entry in self._entries if entry.entry_id not in quarantined and entry.kind is not SideEffectKind.QUARANTINE]

@@ -23,15 +23,20 @@ class PromotionUnitOfWork:
     def prune(self, module_hash: str, expected_pointer_version: int, new_hashes: list[str], evidence_id: str, actor: str, *, key: tuple[str, str] = ("default-user", "code-triage")) -> int:
         return self._transition(module_hash, ModuleLifecycle.PRUNED, expected_pointer_version, new_hashes, evidence_id, actor, "prune", key)
 
-    def restore(self, module_hash: str, expected_pointer_version: int, new_hashes: list[str], evidence_id: str, actor: str, *, key: tuple[str, str] = ("default-user", "code-triage")) -> int:
-        return self._transition(module_hash, ModuleLifecycle.SURVIVOR, expected_pointer_version, new_hashes, evidence_id, actor, "restore", key)
+    def restore(self, module_hash: str, expected_pointer_version: int, new_hashes: list[str], evidence_id: str, actor: str, *, key: tuple[str, str] = ("default-user", "code-triage"), pruned_hashes: list[str] | None = None) -> int:
+        return self._transition(module_hash, ModuleLifecycle.SURVIVOR, expected_pointer_version, new_hashes, evidence_id, actor, "restore", key, pruned_hashes=pruned_hashes)
 
-    def _transition(self, module_hash: str, lifecycle: ModuleLifecycle, expected_pointer_version: int, new_hashes: list[str], evidence_id: str, actor: str, action: str, key: tuple[str, str]) -> int:
+
+    def _transition(self, module_hash: str, lifecycle: ModuleLifecycle, expected_pointer_version: int, new_hashes: list[str], evidence_id: str, actor: str, action: str, key: tuple[str, str], *, pruned_hashes: list[str] | None = None) -> int:
         with self.db.tx() as cur:
             prior_version, prior_hashes = self.pointer_store.get(key)
             cur.execute("UPDATE module_lifecycle SET lifecycle = ? WHERE content_hash = ?", (lifecycle.value, module_hash))
             if cur.rowcount != 1:
                 raise KeyError(module_hash)
+            for pruned_hash in pruned_hashes or []:
+                result = cur.execute("UPDATE module_lifecycle SET lifecycle = ? WHERE content_hash = ?", (ModuleLifecycle.PRUNED.value, pruned_hash))
+                if result.rowcount != 1:
+                    raise KeyError(pruned_hash)
             new_version = self.pointer_store._swap_in_tx(cur, key, expected_pointer_version, new_hashes)
             entry = LedgerEntry(
                 run_id=evidence_id,

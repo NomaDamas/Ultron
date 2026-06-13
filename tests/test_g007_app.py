@@ -13,7 +13,7 @@ def test_full_triage_loop_seed_run_canary_promote_rollback_atrophy_restore():
     assert active == [baseline.content_hash]
 
     run = app.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "Fix a flaky test")
-    assert run["run_manifest"].verify()
+    assert run["run_manifest"].verify(signer=app.manifest_signer)
     assert app.ledger.entries_for_run(run["run_manifest"].run_id)
     assert run["ui_spec"].components
 

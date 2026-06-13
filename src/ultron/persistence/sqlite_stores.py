@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import uuid
 from typing import Any, cast
 
 from ultron.evaluation.harness import EvaluationReport
@@ -220,23 +221,39 @@ class SqliteSideEffectLedger:
         )
         return stored.entry_id
 
-    def _from_row(self, row: sqlite3.Row) -> LedgerEntry:
-        return LedgerEntry(entry_id=row["entry_id"], run_id=row["run_id"], module_set_hash=row["module_set_hash"], module_hash=row["module_hash"], canary_id=row["canary_id"], kind=SideEffectKind(row["kind"]), payload=json.loads(row["payload_json"]), reversible=bool(row["reversible"]), non_reversible_marker=row["non_reversible_marker"], created_at=row["created_at"], quarantined=bool(row["quarantined"]))
+    def _quarantined_entry_ids(self, canary_id: str | None = None) -> set[str]:
+        params: tuple[Any, ...] = () if canary_id is None else (canary_id,)
+        where = "" if canary_id is None else "WHERE canary_id = ?"
+        rows = self.db.conn.execute(f"SELECT entry_ids_json FROM ledger_quarantine_events {where}", params).fetchall()
+        quarantined: set[str] = set()
+        for row in rows:
+            quarantined.update(json.loads(row["entry_ids_json"]))
+        return quarantined
+
+    def _from_row(self, row: sqlite3.Row, quarantined: bool = False) -> LedgerEntry:
+        return LedgerEntry(entry_id=row["entry_id"], run_id=row["run_id"], module_set_hash=row["module_set_hash"], module_hash=row["module_hash"], canary_id=row["canary_id"], kind=SideEffectKind(row["kind"]), payload=json.loads(row["payload_json"]), reversible=bool(row["reversible"]), non_reversible_marker=row["non_reversible_marker"], created_at=row["created_at"], quarantined=quarantined or bool(row["quarantined"]))
 
     def entries_for_canary(self, canary_id: str) -> list[LedgerEntry]:
-        return [self._from_row(row).model_copy(deep=True) for row in self.db.conn.execute("SELECT * FROM ledger WHERE canary_id = ? ORDER BY created_at, entry_id", (canary_id,))]
+        quarantined = self._quarantined_entry_ids(canary_id)
+        return [self._from_row(row, row["entry_id"] in quarantined).model_copy(deep=True) for row in self.db.conn.execute("SELECT * FROM ledger WHERE canary_id = ? ORDER BY created_at, entry_id", (canary_id,))]
 
     def entries_for_run(self, run_id: str) -> list[LedgerEntry]:
-        return [self._from_row(row).model_copy(deep=True) for row in self.db.conn.execute("SELECT * FROM ledger WHERE run_id = ? ORDER BY created_at, entry_id", (run_id,))]
+        quarantined = self._quarantined_entry_ids()
+        return [self._from_row(row, row["entry_id"] in quarantined).model_copy(deep=True) for row in self.db.conn.execute("SELECT * FROM ledger WHERE run_id = ? ORDER BY created_at, entry_id", (run_id,))]
 
     def mark_quarantined(self, canary_id: str) -> list[str]:
         with self.db.tx() as cur:
             rows = cur.execute("SELECT entry_id FROM ledger WHERE canary_id = ? ORDER BY created_at, entry_id", (canary_id,)).fetchall()
-            cur.execute("UPDATE ledger SET quarantined = 1 WHERE canary_id = ?", (canary_id,))
-        return [row["entry_id"] for row in rows]
+            entry_ids = [row["entry_id"] for row in rows]
+            cur.execute(
+                "INSERT INTO ledger_quarantine_events(event_id, canary_id, entry_ids_json, created_at) VALUES (?, ?, ?, ?)",
+                (uuid.uuid4().hex, canary_id, json.dumps(entry_ids, separators=(",", ":")), time.time()),
+            )
+        return entry_ids
 
     def promotable_entries(self) -> list[LedgerEntry]:
-        return [self._from_row(row).model_copy(deep=True) for row in self.db.conn.execute("SELECT * FROM ledger WHERE quarantined = 0 ORDER BY created_at, entry_id")]
+        quarantined = self._quarantined_entry_ids()
+        return [self._from_row(row).model_copy(deep=True) for row in self.db.conn.execute("SELECT * FROM ledger ORDER BY created_at, entry_id") if row["entry_id"] not in quarantined]
 
 
 class SqliteFeedbackChannel:

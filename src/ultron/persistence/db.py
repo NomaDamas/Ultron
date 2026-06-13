@@ -102,6 +102,15 @@ def migrate(db: Database) -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_canary ON ledger(canary_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_run ON ledger(run_id)")
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS ledger_quarantine_events (
+                event_id TEXT PRIMARY KEY,
+                canary_id TEXT NOT NULL,
+                entry_ids_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_quarantine_canary ON ledger_quarantine_events(canary_id)")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS feedback (
                 event_id TEXT PRIMARY KEY,
                 event_json TEXT NOT NULL,

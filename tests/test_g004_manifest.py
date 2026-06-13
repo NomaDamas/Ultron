@@ -1,6 +1,11 @@
 from ultron.composition.manifest import ModuleSetManifest
 from ultron.module.model import PersistencePolicy
 from ultron.run.manifest import RunManifest
+from ultron.run.signer import FixtureKeyProvider, ManifestSigner
+
+
+SIGNER = ManifestSigner.from_provider("fixture", FixtureKeyProvider({"fixture": "secret"}))
+WRONG_SIGNER = ManifestSigner.from_provider("wrong", FixtureKeyProvider({"wrong": "wrong"}))
 
 
 def _module_set():
@@ -46,19 +51,19 @@ def _manifest():
 
 
 def test_run_manifest_sign_verify_and_tamper_detection():
-    signed = _manifest().sign("secret")
+    signed = _manifest().sign(signer=SIGNER)
 
-    assert signed.verify("secret") is True
-    assert signed.verify("wrong") is False
-    assert signed.model_copy(update={"resolved_tool_allowlist": ["read"]}).verify("secret") is False
-    assert signed.model_copy(update={"model_snapshot": {"provider": "evil"}}).verify("secret") is False
-    assert signed.model_copy(update={"ordered_module_hashes": ["h2", "h1"]}).verify("secret") is False
-    assert signed.model_copy(update={"created_at": 124.0}).verify("secret") is False
+    assert signed.verify(signer=SIGNER) is True
+    assert signed.verify(signer=WRONG_SIGNER) is False
+    assert signed.model_copy(update={"resolved_tool_allowlist": ["read"]}).verify(signer=SIGNER) is False
+    assert signed.model_copy(update={"model_snapshot": {"provider": "evil"}}).verify(signer=SIGNER) is False
+    assert signed.model_copy(update={"ordered_module_hashes": ["h2", "h1"]}).verify(signer=SIGNER) is False
+    assert signed.model_copy(update={"created_at": 124.0}).verify(signer=SIGNER) is False
 
 
 def test_run_manifest_signature_is_deterministic_for_identical_effective_state():
-    first = _manifest().sign("secret")
-    second = _manifest().sign("secret")
+    first = _manifest().sign(signer=SIGNER)
+    second = _manifest().sign(signer=SIGNER)
 
     assert first.signature == second.signature
     assert first.canonical_payload() == second.canonical_payload()

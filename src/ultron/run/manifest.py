@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
+
 import json
 from typing import Any, Self
 
@@ -13,15 +13,13 @@ from ultron.composition.manifest import ModuleSetManifest
 from ultron.module.model import PersistencePolicy
 from ultron.run.signer import ManifestSigner
 
-DEFAULT_RUN_MANIFEST_SIGNING_KEY = "ultron-dev-run-manifest-key"
+
 
 
 def canonical_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def hmac_sha256(key: str, payload: str) -> str:
-    return hmac.new(key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _policy_hash(policy: dict[str, Any]) -> str:
@@ -65,20 +63,20 @@ class RunManifest(BaseModel):
         """Return all signed fields, excluding only the signature itself."""
         return self.model_dump(mode="json", exclude={"signature"})
 
-    def sign(self, key: str = DEFAULT_RUN_MANIFEST_SIGNING_KEY, *, signer: ManifestSigner | None = None, key_id: str | None = None) -> Self:
-        payload = self.model_copy(update={"key_id": key_id or (signer.key_id if signer is not None else self.key_id)}).canonical_payload()
-        signature = signer.sign(payload) if signer is not None else hmac_sha256(key, canonical_json(payload))
-        return self.model_copy(update={"signature": signature, "key_id": payload.get("key_id")})
+    def sign(self, *, signer: ManifestSigner) -> Self:
+        if signer is None:
+            raise ValueError("run manifest signing requires an explicit signer")
+        payload = self.model_copy(update={"key_id": signer.key_id}).canonical_payload()
+        signature = signer.sign(payload)
+        return self.model_copy(update={"signature": signature, "key_id": signer.key_id})
 
-    def verify(self, key: str = DEFAULT_RUN_MANIFEST_SIGNING_KEY, *, signer: ManifestSigner | None = None, key_id: str | None = None) -> bool:
-        if self.signature is None:
+    def verify(self, *, signer: ManifestSigner) -> bool:
+        if signer is None:
+            raise ValueError("run manifest verification requires an explicit signer")
+        if self.signature is None or self.key_id is None:
             return False
-        expected_key_id = key_id or self.key_id
-        payload = self.model_copy(update={"key_id": expected_key_id}).canonical_payload()
-        if signer is not None:
-            return signer.verify(payload, self.signature, expected_key_id or "")
-        expected = hmac_sha256(key, canonical_json(payload))
-        return hmac.compare_digest(self.signature, expected)
+        payload = self.model_copy(update={"key_id": self.key_id}).canonical_payload()
+        return signer.verify(payload, self.signature, self.key_id)
 
     @classmethod
     def from_manifest_set(
