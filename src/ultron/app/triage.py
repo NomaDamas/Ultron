@@ -9,6 +9,7 @@ import time
 import uuid
 from typing import Any
 
+from ultron.auth.principal import DEFAULT_LOCAL_PRINCIPAL, Principal
 from ultron.composition.resolver import CompositionResolver
 from ultron.hermes.adapter import AdapterRunRequest, AdapterRunResult, DeterministicFakeHermesAdapter, HermesAdapter
 from ultron.hermes.tool_policy import ToolPolicyCompiler
@@ -24,6 +25,7 @@ from ultron.hermes.module_surface_contract import ModuleSurfaceContract
 from ultron.synthesis.module_synthesizer import DeterministicFakeModuleSynthesizer, SynthesisContext, SynthesisPolicyConstraints, validate_synthesized_module
 from ultron.ledger.canary_store import CanaryScopedStore, RollbackController
 from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind, SideEffectLedger
+from ultron.obs.telemetry import TelemetrySink
 from ultron.module.blobs import BlobStore, BudgetPolicyBlob, PromptPack, SafetyPolicyBlob, ToolPolicyBlob, UiPanelContract
 
 from ultron.module.model import EvidenceLabel, FitnessMetadata, HarnessModule, PersistencePolicy, PrivacyMetadata, PromotionState, TargetLens
@@ -94,6 +96,7 @@ class TriageApp:
         self.last_canary_id: str | None = None
         self.evaluated_candidates: dict[str, dict[str, Any]] = {}
         self.pending_permission_expansions: list[dict[str, Any]] = []
+        self.telemetry = TelemetrySink()
 
     @property
     def pointer_key(self) -> tuple[str, str]:
@@ -164,7 +167,7 @@ class TriageApp:
         version, _ = self.pointer_store.get(self.pointer_key)
         return version
 
-    def start_run(self, user_scope: str, workflow_fingerprint: str, request_text: str) -> dict[str, Any]:
+    def start_run(self, user_scope: str, workflow_fingerprint: str, request_text: str, actor: str | None = None) -> dict[str, Any]:
         self.seed_baseline()
         version, active = self.pointer_store.get((user_scope, workflow_fingerprint))
         should_bootstrap_pointer = False
@@ -209,12 +212,14 @@ class TriageApp:
             timestamp_source="server",
             persistence_mode=PersistencePolicy.ISOLATED,
             resolved_ui_spec_hash=ui_spec.spec_hash,
+            actor=actor,
         ).sign(signer=self.manifest_signer)
         result_payload = result.model_dump(mode="json")
         for module_hash in manifest.ordered_module_hashes:
-            self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", module_hash, None, SideEffectKind.ADAPTER_STATE, result_payload)
+            self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", module_hash, None, SideEffectKind.ADAPTER_STATE, result_payload, actor=actor)
         self._update_fitness_for_modules(manifest.ordered_module_hashes, run_manifest.created_at)
         self.last_manifest = run_manifest
+        self.telemetry.increment("runs_started", event="run_started", subject=actor)
         self.last_ui_spec = ui_spec
         return {"run_result": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec}
 
@@ -313,6 +318,7 @@ class TriageApp:
             variation_primitive_id=proposal.primitive.value,
             canary_id=canary_id,
             resolved_ui_spec_hash=ui_spec.spec_hash,
+            actor=None,
         ).sign(signer=self.manifest_signer)
         result_payload = result.model_dump(mode="json")
         self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", candidate_hash, canary_id, SideEffectKind.ADAPTER_STATE, result_payload)
@@ -354,7 +360,7 @@ class TriageApp:
             self.registry.set_lifecycle(candidate_hash, ModuleLifecycle.DECAYING)
         return {"report": report, "outcome": outcome, "promotable": report.promotable, "canary_id": canary_id}
 
-    def benchmark_and_decide(self, candidate_hash: str, fixture: BenchmarkFixture | None = None, canary_id: str | None = None) -> dict[str, Any]:
+    def benchmark_and_decide(self, candidate_hash: str, fixture: BenchmarkFixture | None = None, canary_id: str | None = None, actor: str | None = None) -> dict[str, Any]:
         self.seed_baseline()
         try:
             self.registry.get(candidate_hash)
@@ -390,6 +396,7 @@ class TriageApp:
         decision["report"] = report
         self.evaluated_candidates[candidate_hash] = {"report": report, "outcome": decision["outcome"], "canary_id": decision["canary_id"]}
         self._update_fitness_for_modules([candidate_hash], time.time(), benchmark_report=report, feedback_summary=self.feedback_summary(candidate_hash))
+        self.telemetry.increment("benchmarks_run", event="benchmark_run", subject=actor)
         return decision
 
     def _benchmark_request(self, module_hashes: list[str], task: Any, side: str) -> AdapterRunRequest:
@@ -422,7 +429,7 @@ class TriageApp:
             and outcome.promotable
         )
 
-    def approve_promotion(self, candidate_hash: str, expected_pointer_version: int) -> dict[str, Any]:
+    def approve_promotion(self, candidate_hash: str, expected_pointer_version: int, actor: str | None = None) -> dict[str, Any]:
         stored = self.evaluated_candidates.get(candidate_hash)
         if stored is None:
             raise PolicyDenied("candidate has no stored evaluation evidence")
@@ -443,13 +450,15 @@ class TriageApp:
                 expected_pointer_version,
                 list(active),
                 evidence_id=report.frozen_versions_hash,
-                actor="triage-app",
+                actor=actor or DEFAULT_LOCAL_PRINCIPAL.subject,
                 key=self.pointer_key,
                 active_module_cap=active_module_cap,
             )
             retained = True
         else:
             retained = self.evolution_loop.retain(candidate_hash, outcome, DEFAULT_SCOPE, DEFAULT_WORKFLOW, expected_pointer_version)
+        if retained:
+            self.telemetry.increment("promotions", event="promotion", subject=actor)
         return {"report": report, "outcome": outcome, "promoted": retained, "canary_id": stored.get("canary_id")}
 
     def synthesize_candidate(self, request_text: str, parent_hash: str | None = None) -> dict[str, Any]:
@@ -501,15 +510,16 @@ class TriageApp:
         except KeyError:
             return False
 
-    def record_permission_expansion_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def record_permission_expansion_request(self, payload: dict[str, Any], actor: str | None = None) -> dict[str, Any]:
         request = {"request_id": uuid.uuid4().hex, "status": "pending_human_approval", "payload": dict(payload)}
         self.pending_permission_expansions.append(request)
+        self.telemetry.increment("permission_requests", event="permission_request", subject=actor)
         return request
 
     def feedback_summary(self, candidate_hash: str) -> FeedbackSummary:
         return self.feedback_aggregator.summarize(candidate_hash)
 
-    def run_atrophy_scan(self, now: float) -> dict[str, Any]:
+    def run_atrophy_scan(self, now: float, actor: str | None = None) -> dict[str, Any]:
         self.seed_baseline()
         version, active = self.pointer_store.get(self.pointer_key)
         eligible = self.evolution_loop.atrophy_scan(active, now)
@@ -528,7 +538,7 @@ class TriageApp:
                     current_version,
                     new_active,
                     f"atrophy-{int(now)}",
-                    "triage-app",
+                    actor or DEFAULT_LOCAL_PRINCIPAL.subject,
                     key=self.pointer_key,
                     is_critical_seed=module_hash in self.evolution_loop._critical_seeds,
                     approved=False,
@@ -537,8 +547,10 @@ class TriageApp:
                 )
                 pruned.append(module_hash)
             elif self.evolution_loop.prune(module_hash):
-                self._append_ledger(f"atrophy-{int(now)}", module_hash, module_hash, None, SideEffectKind.POINTER_TRANSITION, {"action": "atrophy_prune", "prior_version": current_version, "prior_hashes": current_active, "new_hashes": new_active})
+                self._append_ledger(f"atrophy-{int(now)}", module_hash, module_hash, None, SideEffectKind.POINTER_TRANSITION, {"action": "atrophy_prune", "prior_version": current_version, "prior_hashes": current_active, "new_hashes": new_active}, actor=actor)
                 pruned.append(module_hash)
+        if pruned:
+            self.telemetry.increment("prunes", amount=len(pruned), event="prune", subject=actor)
         final_version, final_active = self.pointer_store.get(self.pointer_key)
         return {"eligible": eligible, "pruned": pruned, "prior_version": version, "new_version": final_version, "active": final_active}
 
@@ -592,7 +604,7 @@ class TriageApp:
             self.registry._entries[module_hash] = updated
             self.registry._registration_returns[module_hash] = updated.model_copy(deep=True)
 
-    def atrophy_and_restore(self, module_hash: str | None = None) -> dict[str, Any]:
+    def atrophy_and_restore(self, module_hash: str | None = None, actor: str | None = None) -> dict[str, Any]:
         self.seed_baseline()
         version, active = self.pointer_store.get(self.pointer_key)
         target = module_hash or (active[-1] if active else None)
@@ -607,7 +619,7 @@ class TriageApp:
                 version,
                 pruned_active,
                 uuid.uuid4().hex,
-                "triage-app",
+                actor or DEFAULT_LOCAL_PRINCIPAL.subject,
                 key=self.pointer_key,
                 is_critical_seed=target in self.evolution_loop._critical_seeds,
                 approved=True,
@@ -623,11 +635,15 @@ class TriageApp:
                 evict = restored_active[0] if restored_active[0] != target else restored_active[1]
                 restored_active.remove(evict)
                 pruned_hashes.append(evict)
-            restored = uow.restore(target, restore_version, restored_active, uuid.uuid4().hex, "triage-app", key=self.pointer_key, pruned_hashes=pruned_hashes) is not None
+            restored = uow.restore(target, restore_version, restored_active, uuid.uuid4().hex, actor or DEFAULT_LOCAL_PRINCIPAL.subject, key=self.pointer_key, pruned_hashes=pruned_hashes) is not None
         else:
             pruned = self.evolution_loop.prune(target, is_critical_seed=(target == active[0]), approved=True)
             restore_version, _ = self.pointer_store.get(self.pointer_key)
             restored = self.evolution_loop.restore(target, DEFAULT_SCOPE, DEFAULT_WORKFLOW, restore_version)
+        if pruned:
+            self.telemetry.increment("prunes", event="prune", subject=actor)
+        if restored:
+            self.telemetry.increment("restores", event="restore", subject=actor)
         return {"module_hash": target, "pruned": pruned, "restored": restored}
 
     def _generate_uispec(self, manifest: Any, request_class: str, run_output_summary: dict[str, Any] | None = None) -> UiSpec:
@@ -703,8 +719,8 @@ class TriageApp:
         if result.model_provider != self.adapter.provider_id:
             raise ValueError("live Hermes adapter provider mismatch")
 
-    def _append_ledger(self, run_id: str, module_set_hash: str, module_hash: str | None, canary_id: str | None, kind: SideEffectKind, payload: dict[str, Any]) -> None:
-        self.ledger.append(LedgerEntry(run_id=run_id, module_set_hash=module_set_hash, module_hash=module_hash, canary_id=canary_id, kind=kind, payload=payload))
+    def _append_ledger(self, run_id: str, module_set_hash: str, module_hash: str | None, canary_id: str | None, kind: SideEffectKind, payload: dict[str, Any], actor: str | None = None) -> None:
+        self.ledger.append(LedgerEntry(run_id=run_id, module_set_hash=module_set_hash, module_hash=module_hash, canary_id=canary_id, kind=kind, payload=payload, actor=actor))
 
 
 def _deterministic_decay_score(primary_metric: float | None, feedback_summary: FeedbackSummary | None = None) -> float:

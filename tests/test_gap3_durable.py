@@ -105,7 +105,7 @@ def test_file_database_uses_wal_and_rejects_future_schema(tmp_path):
     path = tmp_path / 'wal.sqlite'
     db = Database(path)
     assert db.conn.execute('PRAGMA journal_mode').fetchone()[0].lower() == 'wal'
-    assert db.conn.execute('SELECT version FROM schema_meta WHERE id = 1').fetchone()[0] == 1
+    assert db.conn.execute('SELECT version FROM schema_meta WHERE id = 1').fetchone()[0] == 2
     db.conn.execute('UPDATE schema_meta SET version = 999 WHERE id = 1')
     db.conn.close()
     with pytest.raises(RuntimeError, match='newer than supported'):

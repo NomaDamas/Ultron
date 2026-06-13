@@ -8,7 +8,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Database:
@@ -99,6 +99,9 @@ def migrate(db: Database) -> None:
                 created_at REAL NOT NULL
             )
         """)
+        columns = {row["name"] for row in cur.execute("PRAGMA table_info(ledger)").fetchall()}
+        if "actor" not in columns:
+            cur.execute("ALTER TABLE ledger ADD COLUMN actor TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_canary ON ledger(canary_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_run ON ledger(run_id)")
         cur.execute("""

@@ -94,6 +94,7 @@ class PromotionUnitOfWork:
                     "actor": actor,
                     "scope_key": list(key),
                 },
+                actor=actor,
             )
             self.ledger._append_in_tx(cur, entry)
             return new_version

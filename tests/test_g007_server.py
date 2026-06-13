@@ -51,7 +51,7 @@ def test_unknown_action_type_422_and_privileged_without_csrf_403():
     client = _client()
     assert client.post("/api/action", json={"type": "NOT_REAL", "payload": {}}).status_code == 422
     response = client.post("/api/action", json={"type": "APPROVE_PROMOTION", "payload": {}, "active_pointer_version": 1})
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 def test_approve_promotion_without_promotable_evidence_denies_and_does_not_advance_pointer():

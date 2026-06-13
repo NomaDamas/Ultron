@@ -1,48 +1,35 @@
 ## Summary
-Re-review found the adapter-only benchmark path and live-stub guard mostly repaired, and the default rubric is now output-content based rather than module-count based. The promotion provenance gate is still bypassable because public evaluate_and_decide accepts caller-supplied provenance="benchmark_runner", so arbitrary fabricated PairedTask floats can still mint approvable evidence without BenchmarkRunner execution. Recommendation is request changes before approval.
+The three GAP6 boundary-enforcement fixes are resolved in the inspected paths. Generator and synthesizer outputs are revalidated at the TriageApp boundary before serve/store or candidate registration, and synthesized content-hash integrity is now checked against recomputed identity bytes before finalize.
 
 ## Analysis
-Evidence inspected:
-- src/ultron/evaluation/harness.py: EvaluationReport.provenance defaults to "manual"; EvaluationHarness.evaluate_paired(..., provenance="manual") copies caller-provided provenance into the report.
-- src/ultron/app/triage.py: evaluate_and_decide(..., provenance="manual") is public and forwards that string directly to evaluate_paired; benchmark_and_decide passes provenance="benchmark_runner"; has_promotable_evidence accepts reports when report.provenance == "benchmark_runner" or allow_manual_promotable_evidence is true; approve_promotion mutates only after has_promotable_evidence passes.
-- src/ultron/evaluation/benchmark.py: BenchmarkRunner._execute requires the resolver to return AdapterRunRequest and always returns self.adapter.run(request); score_output uses issue keywords, risk, concrete test, and actionable references from adapter output, with no module-count scoring.
-- src/ultron/hermes/adapter.py: deterministic fake candidate output now includes risk, actionable_reference, and issue_reference while baseline output does not, giving a real output-quality delta.
-- tests/test_gap4_redteam.py: covers manual default provenance denial, no-op-vs-better rubric behavior, deterministic adapter execution, and live-stub benchmark rejection without stored evidence.
+Spec compliance: `TriageApp._generate_uispec` is the only `ui_generator.generate(...)` call in `src/ultron/app/triage.py` and returns `validate_generated_uispec(generated, self.ui_registry)` before callers assign `last_ui_spec` or include a spec in a run/canary response. The serve paths `current_uispec`, `start_run`, and `propose_and_canary` all route through `_generate_uispec`; `/api/uispec` calls `engine.current_uispec()` in `src/ultron/app/server.py`.
 
-Stage 1 - Spec compliance:
-- Default manual evidence from evaluate_and_decide is denied by has_promotable_evidence, and approve_promotion raises before pointer mutation for that default path.
-- However, the public evaluate_and_decide provenance parameter is caller-controlled. A caller can supply fabricated paired tasks plus provenance="benchmark_runner"; the downstream gate then treats the report as benchmark evidence even though it did not come from benchmark_and_decide or BenchmarkRunner. This misses the central requirement that approvable evidence be real adapter-executed benchmark evidence.
-- No-op and equal-output candidates tie, while better output wins under the new fixture. Scoring ignores the old module_hash_count_at_least rubric key and is tied to adapter output content.
-- Benchmark execution always uses self.adapter.run, and live adapter stub/fake results are rejected before evidence storage.
+Synthesis boundary: `TriageApp.synthesize_candidate` wraps `self.module_synthesizer.synthesize(context)` in `validate_synthesized_module(..., parent=parent, registry=self.registry)` before deriving `candidate_hash`, calling `registry.register`, registering the candidate, writing canary state, tracking rollback, or setting `last_candidate_hash` / `last_canary_id`.
 
-Stage 2 - Architecture:
-- The intended boundary is benchmark_and_decide as the only producer of promotable benchmark provenance. That boundary is porous because provenance is a free string accepted by the public manual evaluation API rather than a private/internal capability derived from BenchmarkRunner completion.
-- The allow_manual_promotable_evidence escape hatch is test-scoped through build_durable_triage_app_for_tests, but it remains a mutable flag on the product object and weakens the invariant if reachable by non-test callers.
+Content identity: `validate_synthesized_module` captures `declared_hash = module.content_hash`, computes `recomputed_hash = module.compute_content_hash()`, rejects mismatches, and only then calls `module.finalized()`. This makes the check non-tautological because it compares incoming declared hash to freshly recomputed identity bytes before overwriting content_hash.
 
-Stage 3 - Code quality/security/performance:
-- _section_has_content can count an empty dict/list section as non-empty when flattened output has another key after the section marker, so the risk-section criterion is weaker than advertised. This is less severe than the provenance bypass but should be tightened.
+Tests: `tests/test_gap6_redteam.py` covers injected malicious UI generator rejection with `last_ui_spec` remaining unset, injected permission-expanding synthesizer rejection with unchanged pointer/registry/last candidate/canary state, and tampered declared content_hash rejection. The provided full-suite evidence reports 277 passed / 3 skipped, with the local artifact `artifacts/full-suite.txt` showing the earlier full run passed.
 
 ## Root Cause
-The fix models provenance as caller-supplied data instead of an unforgeable result of the benchmark execution path. has_promotable_evidence trusts report.provenance without proving the report was generated by benchmark_and_decide after adapter runs and live-result validation.
+The prior blockers were boundary trust violations: deterministic seams validated internally, but application boundaries could accept substituted generator/synthesizer outputs without revalidating them before serving, storing, or registering. The fix centralizes validation at the application boundary and performs identity verification before normalization.
 
 ## Findings
-1. HIGH - src/ultron/app/triage.py:309-338, src/ultron/app/triage.py:383-403: Public manual evaluation can forge benchmark provenance. Impact: arbitrary fabricated PairedTask floats can mint approvable evidence by passing provenance="benchmark_runner", bypassing the intended real-adapter benchmark requirement. Fix: remove provenance from the public evaluate_and_decide API or make it private/internal; only benchmark_and_decide should call a private storage/evaluation helper that marks benchmark provenance after successful BenchmarkRunner execution and live validation.
-2. MEDIUM - src/ultron/app/triage.py:389-390, src/ultron/app/triage.py:543-544: allow_manual_promotable_evidence is a mutable product-object escape hatch. Impact: weakens the provenance invariant outside the intended benchmark path if enabled accidentally. Fix: isolate this to test-only helpers or durable-test fixtures without runtime product surface, or gate it behind explicit test configuration not available in production construction.
-3. LOW - src/ultron/evaluation/benchmark.py:128-137: _section_has_content can treat empty risk as non-empty in flattened dict output because it reads into the next key. Impact: the rubric may award risk-section credit without risk content. Fix: inspect structured dict fields directly for known sections before flattening, or bound section parsing to the current line/key only.
+None requiring changes.
+
+LOW, `src/ultron/synthesis/module_synthesizer.py`: the local `_expands_permissions` helper is slightly narrower than `ModuleRegistry.can_auto_promote` because registry expansion also considers declared surface names and required capabilities. Impact is limited because `validate_synthesized_module(..., registry=self.registry)` immediately applies `registry.can_auto_promote(candidate)` in the app boundary; standalone validation with `registry=None` remains less comprehensive. Fix only if this validator is intended to be reused outside app registration boundaries: consolidate on the registry/shared expansion helper.
 
 ## Recommendations
-1. Block approval until benchmark provenance cannot be supplied by arbitrary callers. Make benchmark provenance private and derived from benchmark_and_decide only.
-2. Add a red-team test that calls evaluate_and_decide(..., provenance="benchmark_runner") with fabricated promotable tasks and asserts has_promotable_evidence remains false and approval does not mutate the pointer.
-3. Replace or remove allow_manual_promotable_evidence from product object construction; keep legacy durable tests on explicit benchmark evidence or a test-only adapter path.
-4. Tighten _section_has_content and add a test proving empty risk: [] / risk: "" does not score.
+1. Approve GAP6 boundary fixes.
+2. Keep the app-level revalidation as the authoritative boundary even when deterministic fake generators/synthesizers validate internally.
+3. Consider consolidating duplicate `_expands_permissions` logic to prevent future drift between synthesis validation and registry promotion policy.
 
 ## Architectural Status
-BLOCK
+CLEAR
 
 ## Code Review Recommendation
-REQUEST CHANGES
+APPROVE
 
 ## Trade-offs
-- Private helper / no public provenance parameter: strongest invariant, small refactor, recommended.
-- Enum/string provenance with validation only: clearer typing but still forgeable if callers can choose benchmark_runner, not sufficient.
-- Keep allow_manual_promotable_evidence: convenient for legacy tests but preserves a safety escape hatch; acceptable only if impossible in production construction and clearly test-only.
+- Boundary revalidation costs a small amount of duplicate validation but prevents injected/live seams from bypassing server-owned policy.
+- Keeping deterministic seam validation is useful defense-in-depth, but it must not replace the app boundary check.
+- Consolidating permission-expansion logic reduces drift but introduces coupling from synthesis validation to registry policy; current app path already gets the stricter registry check.

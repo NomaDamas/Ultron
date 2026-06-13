@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 import secrets
 from pathlib import Path
 from typing import Any
@@ -13,19 +15,30 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, PolicyDenied, TriageApp
+from ultron.auth.principal import DEFAULT_LOCAL_PRINCIPAL, Scope, SessionStore
 from ultron.evolution.variation import VariationPrimitive
 from ultron.ui.runtime import ActionCommand, ActionType, validate_action
 
 CSP = "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 STATIC_DIR = Path(__file__).with_name("static")
+SESSION_TTL_SECONDS = 60 * 60
+ACTION_SCOPES = {
+    ActionType.APPROVE_PROMOTION: Scope.APPROVE_PROMOTION,
+    ActionType.ROLLBACK_CANARY: Scope.ROLLBACK,
+    ActionType.RESTORE_MODULE: Scope.RESTORE,
+    ActionType.REQUEST_PERMISSION_EXPANSION: Scope.REQUEST_PERMISSION_EXPANSION,
+    ActionType.RUN_BENCHMARK: Scope.RUN_BENCHMARK,
+}
 
 
 def create_app() -> FastAPI:
     engine = TriageApp()
     engine.seed_baseline()
-    sessions: dict[str, str] = {}
+    csrf_tokens: dict[str, str] = {}
+    session_store = SessionStore(secure_cookies=os.getenv("ULTRON_SECURE_COOKIES", "0") == "1")
     app = FastAPI(title="Ultron Triage MVP")
     app.state.triage = engine
+    app.state.session_store = session_store
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.exception_handler(RequestValidationError)
@@ -34,12 +47,12 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index(response: Response) -> str:
-        session_token = secrets.token_urlsafe(24)
+        session_token = session_store.create_session(DEFAULT_LOCAL_PRINCIPAL, SESSION_TTL_SECONDS)
         csrf_token = secrets.token_urlsafe(24)
-        sessions[session_token] = csrf_token
+        csrf_tokens[session_token] = csrf_token
         response.headers["Content-Security-Policy"] = CSP
-        response.set_cookie("ultron_session", session_token, httponly=True, samesite="strict")
-        response.set_cookie("ultron_csrf", csrf_token, httponly=False, samesite="strict")
+        response.set_cookie("ultron_session", session_token, **session_store.cookie_attributes(httponly=True))
+        response.set_cookie("ultron_csrf", csrf_token, httponly=False, samesite="strict", secure=session_store.secure_cookies)
         return """<!doctype html>
 <html lang=\"en\">
 <head><meta charset=\"utf-8\"><title>Ultron Triage</title></head>
@@ -54,6 +67,11 @@ def create_app() -> FastAPI:
         response.headers["Content-Security-Policy"] = CSP
         return engine.current_uispec().model_dump(mode="json")
 
+    @app.get("/api/metrics")
+    def metrics(response: Response) -> dict[str, Any]:
+        response.headers["Content-Security-Policy"] = CSP
+        return engine.telemetry.snapshot()
+
     @app.post("/api/action")
     def action(
         cmd: ActionCommand,
@@ -62,8 +80,17 @@ def create_app() -> FastAPI:
         x_csrf_token: str | None = Header(default=None),
     ) -> dict[str, Any]:
         response.headers["Content-Security-Policy"] = CSP
-        authed = ultron_session in sessions
-        csrf_ok = authed and cmd.csrf_token is not None and sessions.get(ultron_session or "") == cmd.csrf_token and x_csrf_token == cmd.csrf_token
+        principal = session_store.resolve(ultron_session, time.time())
+        authed = principal is not None
+        csrf_ok = authed and cmd.csrf_token is not None and csrf_tokens.get(ultron_session or "") == cmd.csrf_token and x_csrf_token == cmd.csrf_token
+        required_scope = ACTION_SCOPES.get(cmd.type)
+        if required_scope is not None:
+            if principal is None:
+                engine.telemetry.increment("auth_failures", event="missing_or_expired_session")
+                raise HTTPException(status_code=401, detail="privileged action requires authenticated session")
+            if not principal.has_scope(required_scope):
+                engine.telemetry.increment("auth_failures", event="missing_scope", subject=principal.subject)
+                raise HTTPException(status_code=403, detail=f"privileged action requires scope {required_scope.value}")
         policy_ok = _policy_ok(engine, cmd)
         try:
             validate_action(
@@ -80,7 +107,7 @@ def create_app() -> FastAPI:
 
         if cmd.type is ActionType.SUBMIT_REQUEST:
             request_text = str(cmd.payload.get("request_text", ""))
-            result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text)
+            result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text, actor=principal.subject if principal else None)
             canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text)
             candidate_hash = canary["candidate"].content_hash or ""
             return _jsonable({"ok": True, "result": result, "candidate": canary["candidate"], "canary_id": canary["canary_id"]})
@@ -89,7 +116,7 @@ def create_app() -> FastAPI:
             if not candidate_hash:
                 raise HTTPException(status_code=403, detail="candidate benchmark requires a candidate")
             try:
-                evaluation = engine.benchmark_and_decide(candidate_hash, canary_id=str(cmd.payload.get("canary_id") or engine.last_canary_id or ""))
+                evaluation = engine.benchmark_and_decide(candidate_hash, canary_id=str(cmd.payload.get("canary_id") or engine.last_canary_id or ""), actor=principal.subject if principal else None)
             except (KeyError, PermissionError, ValueError) as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             return _jsonable({"ok": True, "evaluation": evaluation})
@@ -99,7 +126,7 @@ def create_app() -> FastAPI:
         if cmd.type is ActionType.APPROVE_PROMOTION:
             candidate_hash = str(cmd.payload.get("candidate_hash") or "")
             try:
-                decision = engine.approve_promotion(candidate_hash, cmd.active_pointer_version or -1)
+                decision = engine.approve_promotion(candidate_hash, cmd.active_pointer_version or -1, actor=principal.subject if principal else None)
             except PolicyDenied as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             except (KeyError, PermissionError, ValueError) as exc:
@@ -110,12 +137,13 @@ def create_app() -> FastAPI:
             if not canary_id:
                 raise HTTPException(status_code=403, detail="canary rejected by policy")
             report = engine.rollback_controller.rollback(canary_id)
+            engine.telemetry.increment("rollbacks", event="rollback", subject=principal.subject if principal else None)
             return _jsonable({"ok": True, "rollback": report})
         if cmd.type is ActionType.RESTORE_MODULE:
-            restored = engine.atrophy_and_restore(str(cmd.payload.get("module_hash") or "") or None)
+            restored = engine.atrophy_and_restore(str(cmd.payload.get("module_hash") or "") or None, actor=principal.subject if principal else None)
             return _jsonable({"ok": True, "restored": restored})
         if cmd.type is ActionType.REQUEST_PERMISSION_EXPANSION:
-            request = engine.record_permission_expansion_request(cmd.payload)
+            request = engine.record_permission_expansion_request(cmd.payload, actor=principal.subject if principal else None)
             return _jsonable({"ok": True, "permission_expansion": request})
         raise HTTPException(status_code=403, detail="unsupported privileged action")
 

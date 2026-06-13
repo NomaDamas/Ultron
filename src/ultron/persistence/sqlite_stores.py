@@ -216,8 +216,8 @@ class SqliteSideEffectLedger:
     def _append_in_tx(self, cur: sqlite3.Cursor, entry: LedgerEntry) -> str:
         stored = entry.model_copy(deep=True)
         cur.execute(
-            "INSERT INTO ledger(entry_id, run_id, module_set_hash, module_hash, canary_id, kind, payload_json, reversible, non_reversible_marker, quarantined, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (stored.entry_id, stored.run_id, stored.module_set_hash, stored.module_hash, stored.canary_id, stored.kind.value, json.dumps(stored.payload, sort_keys=True, separators=(",", ":")), int(stored.reversible), stored.non_reversible_marker, int(stored.quarantined), stored.created_at),
+            "INSERT INTO ledger(entry_id, run_id, module_set_hash, module_hash, canary_id, kind, payload_json, reversible, non_reversible_marker, quarantined, created_at, actor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (stored.entry_id, stored.run_id, stored.module_set_hash, stored.module_hash, stored.canary_id, stored.kind.value, json.dumps(stored.payload, sort_keys=True, separators=(",", ":")), int(stored.reversible), stored.non_reversible_marker, int(stored.quarantined), stored.created_at, stored.actor),
         )
         return stored.entry_id
 
@@ -231,7 +231,7 @@ class SqliteSideEffectLedger:
         return quarantined
 
     def _from_row(self, row: sqlite3.Row, quarantined: bool = False) -> LedgerEntry:
-        return LedgerEntry(entry_id=row["entry_id"], run_id=row["run_id"], module_set_hash=row["module_set_hash"], module_hash=row["module_hash"], canary_id=row["canary_id"], kind=SideEffectKind(row["kind"]), payload=json.loads(row["payload_json"]), reversible=bool(row["reversible"]), non_reversible_marker=row["non_reversible_marker"], created_at=row["created_at"], quarantined=quarantined or bool(row["quarantined"]))
+        return LedgerEntry(entry_id=row["entry_id"], run_id=row["run_id"], module_set_hash=row["module_set_hash"], module_hash=row["module_hash"], canary_id=row["canary_id"], kind=SideEffectKind(row["kind"]), payload=json.loads(row["payload_json"]), reversible=bool(row["reversible"]), non_reversible_marker=row["non_reversible_marker"], created_at=row["created_at"], quarantined=quarantined or bool(row["quarantined"]), actor=row["actor"] if "actor" in row.keys() else None)
 
     def entries_for_canary(self, canary_id: str) -> list[LedgerEntry]:
         quarantined = self._quarantined_entry_ids(canary_id)

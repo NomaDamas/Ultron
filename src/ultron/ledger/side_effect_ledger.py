@@ -38,6 +38,7 @@ class LedgerEntry(BaseModel):
     non_reversible_marker: str | None = None
     created_at: float = Field(default_factory=time.time)
     quarantined: bool = False
+    actor: str | None = None
 
 
 class SideEffectLedger:

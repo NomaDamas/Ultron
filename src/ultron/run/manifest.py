@@ -58,6 +58,7 @@ class RunManifest(BaseModel):
     timestamp_source: str
     key_id: str | None = None
     signature: str | None = None
+    actor: str | None = None
 
     def canonical_payload(self) -> dict[str, Any]:
         """Return all signed fields, excluding only the signature itself."""
@@ -104,6 +105,7 @@ class RunManifest(BaseModel):
         external_call_policy_id: str | None = None,
         safety_policy_hash: str | None = None,
         budget_policy_hash: str | None = None,
+        actor: str | None = None,
     ) -> Self:
         manifest_hash = manifest.manifest_hash or manifest.compute_manifest_hash()
         return cls(
@@ -134,4 +136,5 @@ class RunManifest(BaseModel):
             side_effect_ledger_id=side_effect_ledger_id,
             created_at=created_at,
             timestamp_source=timestamp_source,
+            actor=actor,
         )
