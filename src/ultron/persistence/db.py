@@ -8,7 +8,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Database:
@@ -112,6 +112,9 @@ def migrate(db: Database) -> None:
                 created_at REAL NOT NULL
             )
         """)
+        quarantine_columns = {row["name"] for row in cur.execute("PRAGMA table_info(ledger_quarantine_events)").fetchall()}
+        if "actor" not in quarantine_columns:
+            cur.execute("ALTER TABLE ledger_quarantine_events ADD COLUMN actor TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_quarantine_canary ON ledger_quarantine_events(canary_id)")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS feedback (

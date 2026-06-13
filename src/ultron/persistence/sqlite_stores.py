@@ -241,13 +241,15 @@ class SqliteSideEffectLedger:
         quarantined = self._quarantined_entry_ids()
         return [self._from_row(row, row["entry_id"] in quarantined).model_copy(deep=True) for row in self.db.conn.execute("SELECT * FROM ledger WHERE run_id = ? ORDER BY created_at, entry_id", (run_id,))]
 
-    def mark_quarantined(self, canary_id: str) -> list[str]:
+    def mark_quarantined(self, canary_id: str, actor: str | None = None) -> list[str]:
+        if not actor:
+            raise ValueError("quarantine actor is required")
         with self.db.tx() as cur:
             rows = cur.execute("SELECT entry_id FROM ledger WHERE canary_id = ? ORDER BY created_at, entry_id", (canary_id,)).fetchall()
             entry_ids = [row["entry_id"] for row in rows]
             cur.execute(
-                "INSERT INTO ledger_quarantine_events(event_id, canary_id, entry_ids_json, created_at) VALUES (?, ?, ?, ?)",
-                (uuid.uuid4().hex, canary_id, json.dumps(entry_ids, separators=(",", ":")), time.time()),
+                "INSERT INTO ledger_quarantine_events(event_id, canary_id, entry_ids_json, created_at, actor) VALUES (?, ?, ?, ?, ?)",
+                (uuid.uuid4().hex, canary_id, json.dumps(entry_ids, separators=(",", ":")), time.time(), actor),
             )
         return entry_ids
 

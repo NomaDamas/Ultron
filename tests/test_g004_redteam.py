@@ -133,7 +133,7 @@ def test_side_effect_ledger_keeps_all_entries_and_quarantine_only_blocks_promoti
         entry_ids[5],
     ]
 
-    quarantined = ledger.mark_quarantined("canary-a")
+    quarantined = ledger.mark_quarantined("canary-a", actor="tester")
 
     assert quarantined == [entry_ids[0], entry_ids[1], entry_ids[5]]
     assert [entry.entry_id for entry in ledger.entries_for_canary("canary-a")] == [
@@ -183,7 +183,7 @@ def test_rollback_hammers_no_poisoning_paths_aliases_promotable_entries_and_seco
         )
         controller.baseline_write(namespace, f"baseline-{key}", {"safe": namespace})
 
-    report = controller.rollback(canary_id)
+    report = controller.rollback(canary_id, actor="tester")
 
     assert set(report.dropped_namespaces) == set(ATTACK_NAMESPACES)
     assert len(report.quarantined_entry_ids) == len(ATTACK_NAMESPACES)
@@ -223,7 +223,7 @@ def test_direct_canary_store_reads_are_empty_for_all_namespaces_after_rollback(n
     if namespace != "pointer":
         store.write(canary_id, namespace, "secret", {"poison": namespace})
 
-    controller.rollback(canary_id)
+    controller.rollback(canary_id, actor="tester")
 
     assert store.read(canary_id, namespace, "secret") is None
     assert store.read_namespace(canary_id, namespace) == {}
@@ -243,7 +243,7 @@ def test_pointer_rollback_reverts_candidate_via_cas_and_rejects_stale_candidate_
     controller.track_pointer_candidate(canary_id, key, prior_version, prior_hashes, ["candidate-v1"])
     ledger.append(_entry(canary_id=canary_id, run_id="run-pointer", kind=SideEffectKind.POINTER_TRANSITION))
 
-    report = controller.rollback(canary_id)
+    report = controller.rollback(canary_id, actor="tester")
 
     assert report.pointer_reverted is True
     assert pointer.get(key) == (candidate_version + 1, prior_hashes)

@@ -103,7 +103,7 @@ def test_submit_request_does_not_create_evidence_and_benchmark_required_for_appr
     )
     assert denied.status_code == 403
 
-    benchmarked = client.post("/api/action", json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": candidate_hash}})
+    benchmarked = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": candidate_hash}, "csrf_token": csrf, "active_pointer_version": client.app.state.triage.current_pointer_version()})
     assert benchmarked.status_code == 200
     assert benchmarked.json()["evaluation"]["report"]["paired_tasks"] >= 10
 

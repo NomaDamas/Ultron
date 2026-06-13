@@ -8,6 +8,9 @@ from ultron.app.triage import build_durable_triage_app_for_tests
 from ultron.auth.principal import Principal, Scope
 from ultron.evolution.variation import VariationPrimitive
 from ultron.hermes.integrity import VendorIntegrityError, verify_vendor_integrity
+from ultron.hermes.integrity import load_integrity_manifest
+from ultron.hermes.pin import VENDOR_REF_PATH
+from ultron.ledger.side_effect_ledger import SideEffectKind
 
 
 def _csrf(client):
@@ -65,6 +68,9 @@ def test_actor_audit_in_memory_and_durable_promote_restore(tmp_path):
     candidate_hash = submitted.json()["candidate"]["content_hash"]
     canary_id = submitted.json()["canary_id"]
     assert _privileged(client, csrf, "ROLLBACK_CANARY", {"canary_id": canary_id}).status_code == 200
+    quarantine_events = [entry for entry in client.app.state.triage.ledger._entries if entry.kind is SideEffectKind.QUARANTINE]
+    assert quarantine_events[-1].actor == "local-operator"
+    assert quarantine_events[-1].payload["actor"] == "local-operator"
     run_entries = client.app.state.triage.ledger.entries_for_run(submitted.json()["result"]["run_manifest"]["run_id"])
     assert run_entries and {entry.actor for entry in run_entries} == {"local-operator"}
     assert submitted.json()["result"]["run_manifest"]["actor"] == "local-operator"
@@ -78,6 +84,10 @@ def test_actor_audit_in_memory_and_durable_promote_restore(tmp_path):
     entries = [entry for entry in app.ledger.promotable_entries() if entry.payload.get("action") == "promote"]
     assert entries[-1].actor == "durable-actor"
     assert entries[-1].payload["actor"] == "durable-actor"
+    durable_canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "rollback-durable"})
+    app.rollback_controller.rollback(durable_canary["canary_id"], actor="durable-rollback-actor")
+    row = app.db.conn.execute("SELECT actor FROM ledger_quarantine_events WHERE canary_id = ?", (durable_canary["canary_id"],)).fetchone()
+    assert row["actor"] == "durable-rollback-actor"
 
 
 def test_metrics_counters_and_no_secret_fields():
@@ -85,7 +95,11 @@ def test_metrics_counters_and_no_secret_fields():
     csrf = _csrf(client)
     submitted = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "metrics"}})
     body = submitted.json()
-    benchmarked = client.post("/api/action", json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": body["candidate"]["content_hash"], "canary_id": body["canary_id"]}})
+    no_csrf = client.post("/api/action", json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": body["candidate"]["content_hash"], "canary_id": body["canary_id"]}})
+    assert no_csrf.status_code == 403
+    stale = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": body["candidate"]["content_hash"], "canary_id": body["canary_id"]}, pointer_version=client.app.state.triage.current_pointer_version() - 1)
+    assert stale.status_code == 403
+    benchmarked = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": body["candidate"]["content_hash"], "canary_id": body["canary_id"]})
     assert benchmarked.status_code == 200
     rolled = _privileged(client, csrf, "ROLLBACK_CANARY", {"canary_id": body["canary_id"]})
     assert rolled.status_code == 200
@@ -116,6 +130,17 @@ def test_vendor_integrity_absent_and_fail_closed_on_corruption(tmp_path):
     # The committed manifest is for the real vendored tree; a copied/corrupted tree must fail closed.
     with pytest.raises(VendorIntegrityError):
         verify_vendor_integrity(vendor)
+
+
+def test_vendor_integrity_manifest_has_real_hashes_and_verifies_real_vendor():
+    manifest = load_integrity_manifest()
+    assert manifest.critical_files
+    assert not [hash_value for hash_value in manifest.critical_files.values() if hash_value == "0" * 64]
+    if not VENDOR_REF_PATH.is_dir():
+        pytest.skip("vendored Hermes reference is absent")
+    verified = verify_vendor_integrity(VENDOR_REF_PATH)
+    assert verified.status == "verified"
+    assert set(verified.checked_files) == set(manifest.critical_files)
 
 
 def test_readme_mentions_real_vs_seam_and_gap_statuses():

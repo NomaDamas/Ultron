@@ -105,7 +105,7 @@ def test_file_database_uses_wal_and_rejects_future_schema(tmp_path):
     path = tmp_path / 'wal.sqlite'
     db = Database(path)
     assert db.conn.execute('PRAGMA journal_mode').fetchone()[0].lower() == 'wal'
-    assert db.conn.execute('SELECT version FROM schema_meta WHERE id = 1').fetchone()[0] == 2
+    assert db.conn.execute('SELECT version FROM schema_meta WHERE id = 1').fetchone()[0] == 3
     db.conn.execute('UPDATE schema_meta SET version = 999 WHERE id = 1')
     db.conn.close()
     with pytest.raises(RuntimeError, match='newer than supported'):
@@ -369,7 +369,7 @@ def test_append_only_quarantine_survives_restart(tmp_path):
     e1 = LedgerEntry(run_id='r', module_set_hash='s', canary_id='c', kind=SideEffectKind.ADAPTER_STATE)
     e2 = LedgerEntry(run_id='r', module_set_hash='s', canary_id='c', kind=SideEffectKind.TELEMETRY)
     ledger.append(e1); ledger.append(e2)
-    assert ledger.mark_quarantined('c') == [e1.entry_id, e2.entry_id]
+    assert ledger.mark_quarantined('c', actor='tester') == [e1.entry_id, e2.entry_id]
     assert [row[0] for row in Database(path).conn.execute('SELECT quarantined FROM ledger WHERE canary_id = ?', ('c',)).fetchall()] == [0, 0]
     assert Database(path).conn.execute('SELECT COUNT(*) FROM ledger_quarantine_events WHERE canary_id = ?', ('c',)).fetchone()[0] == 1
     ledger2 = SqliteSideEffectLedger(Database(path))

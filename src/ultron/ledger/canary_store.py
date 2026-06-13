@@ -95,8 +95,10 @@ class RollbackController:
             )
         )
 
-    def rollback(self, canary_id: str) -> RollbackReport:
-        quarantined_entry_ids = self.ledger.mark_quarantined(canary_id)
+    def rollback(self, canary_id: str, actor: str | None = None) -> RollbackReport:
+        if not actor:
+            raise ValueError("rollback actor is required")
+        quarantined_entry_ids = self.ledger.mark_quarantined(canary_id, actor=actor)
         dropped_namespaces = self.canary_store.drop_canary(canary_id)
         pointer_reverted = self._revert_pointer(canary_id)
         report = RollbackReport(

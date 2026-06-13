@@ -24,7 +24,7 @@ def test_side_effect_ledger_is_append_only_and_quarantine_preserves_audit():
 
     assert [entry.entry_id for entry in ledger.entries_for_canary("canary-1")] == [first_id, second_id]
 
-    quarantined = ledger.mark_quarantined("canary-1")
+    quarantined = ledger.mark_quarantined("canary-1", actor="tester")
 
     assert quarantined == [first_id, second_id]
     assert [entry.entry_id for entry in ledger.entries_for_canary("canary-1")] == [first_id, second_id]
@@ -49,7 +49,7 @@ def test_rollback_drops_isolated_canary_state_and_prevents_later_baseline_poison
         ledger.append(_entry(canary_id=canary_id, kind=kind))
 
     controller.baseline_write("memory", "baseline", "safe")
-    report = controller.rollback(canary_id)
+    report = controller.rollback(canary_id, actor="tester")
 
     assert set(report.dropped_namespaces) == {"memory", "skills", "ui_cache", "adapter_state"}
     assert len(report.quarantined_entry_ids) == 4
@@ -80,7 +80,7 @@ def test_pointer_rollback_reverts_candidate_with_cas_and_stale_state_cannot_win(
     pointer.swap(key, prior_version, ["candidate-hash"])
     controller.track_pointer_candidate(canary_id, key, prior_version, prior_hashes, ["candidate-hash"])
 
-    report = controller.rollback(canary_id)
+    report = controller.rollback(canary_id, actor="tester")
 
     assert report.pointer_reverted is True
     assert pointer.get(key) == (2, [])
@@ -115,7 +115,7 @@ def test_fresh_controller_rolls_back_pointer_from_durable_ledger_transition():
     )
 
     fresh = RollbackController(ledger=ledger, canary_store=store, pointer_store=pointer)
-    report = fresh.rollback(canary_id)
+    report = fresh.rollback(canary_id, actor="tester")
 
     assert report.pointer_reverted is True
     assert pointer.get(key) == (2, [])
@@ -145,12 +145,12 @@ def test_untracked_pointer_transition_is_detected_from_ledger_and_rollback_fails
             },
         )
     )
-    ledger.mark_quarantined(canary_id)
+    ledger.mark_quarantined(canary_id, actor="tester")
 
     with pytest.raises(AssertionError, match="active pointer"):
         controller.assert_no_poisoning(canary_id)
     with pytest.raises(RuntimeError, match="prior version"):
-        controller.rollback(canary_id)
+        controller.rollback(canary_id, actor="tester")
 
 
 def test_pointer_rollback_raises_when_cas_revert_fails():
@@ -183,7 +183,7 @@ def test_pointer_rollback_raises_when_cas_revert_fails():
     )
 
     with pytest.raises(RuntimeError, match="failed to rollback"):
-        controller.rollback(canary_id)
+        controller.rollback(canary_id, actor="tester")
     with pytest.raises(AssertionError, match="active pointer"):
         controller.assert_no_poisoning(canary_id)
 
@@ -202,7 +202,7 @@ def test_stale_reference_from_read_cannot_reach_dropped_canary_state_after_rollb
     stale["nested"]["secret"] = "mutated-stale"
     namespace["secret"]["nested"]["secret"] = "mutated-namespace"
 
-    controller.rollback(canary_id)
+    controller.rollback(canary_id, actor="tester")
 
     assert stale == {"nested": {"secret": "mutated-stale"}}
     assert namespace == {"secret": {"nested": {"secret": "mutated-namespace"}}}
@@ -240,7 +240,7 @@ def test_multiple_pointer_transitions_for_one_canary_revert_to_original_baseline
     )
 
     fresh = RollbackController(ledger=ledger, canary_store=store, pointer_store=pointer)
-    report = fresh.rollback(canary_id)
+    report = fresh.rollback(canary_id, actor="tester")
 
     assert report.pointer_reverted is True
     assert pointer.get(key) == (5, ["baseline-hash"])

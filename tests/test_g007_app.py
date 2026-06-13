@@ -45,7 +45,7 @@ def test_full_triage_loop_seed_run_canary_promote_rollback_atrophy_restore():
         GuardrailMetrics(),
     )
     assert bad_decision["promotable"] is False
-    rollback = app.rollback_controller.rollback(bad["canary_id"])
+    rollback = app.rollback_controller.rollback(bad["canary_id"], actor="tester")
     assert rollback is not None
     app.rollback_controller.assert_no_poisoning(bad["canary_id"])
     assert bad_hash not in app.pointer_store.get(app.pointer_key)[1]

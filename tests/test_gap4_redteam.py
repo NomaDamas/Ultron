@@ -163,7 +163,7 @@ def test_no_fabricated_submit_metrics_and_promotion_requires_real_benchmark() ->
     assert denied.status_code == 403
     assert client.app.state.triage.pointer_store.get(client.app.state.triage.pointer_key) == initial_pointer
 
-    benchmarked = client.post("/api/action", json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": candidate_hash}})
+    benchmarked = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": candidate_hash}, "csrf_token": csrf, "active_pointer_version": client.app.state.triage.current_pointer_version()})
     assert benchmarked.status_code == 200
     evaluation = benchmarked.json()["evaluation"]
     assert evaluation["report"]["evidence_label"] in {"BENCHMARK", EvidenceLabel.BENCHMARK.value}

@@ -136,7 +136,7 @@ def create_app() -> FastAPI:
             canary_id = str(cmd.payload.get("canary_id") or engine.last_canary_id or "")
             if not canary_id:
                 raise HTTPException(status_code=403, detail="canary rejected by policy")
-            report = engine.rollback_controller.rollback(canary_id)
+            report = engine.rollback_controller.rollback(canary_id, actor=principal.subject if principal else None)
             engine.telemetry.increment("rollbacks", event="rollback", subject=principal.subject if principal else None)
             return _jsonable({"ok": True, "rollback": report})
         if cmd.type is ActionType.RESTORE_MODULE:

@@ -60,15 +60,18 @@ class SideEffectLedger:
         quarantined = self._quarantined_entry_ids()
         return [entry.model_copy(update={"quarantined": entry.entry_id in quarantined}, deep=True) for entry in self._entries if entry.run_id == run_id and entry.kind is not SideEffectKind.QUARANTINE]
 
-    def mark_quarantined(self, canary_id: str) -> list[str]:
+    def mark_quarantined(self, canary_id: str, actor: str | None = None) -> list[str]:
         quarantined = [entry.entry_id for entry in self._entries if entry.canary_id == canary_id and entry.kind is not SideEffectKind.QUARANTINE]
+        if not actor:
+            raise ValueError("quarantine actor is required")
         self._entries.append(
             LedgerEntry(
                 run_id=f"quarantine-{canary_id}",
                 module_set_hash="quarantine",
                 canary_id=canary_id,
                 kind=SideEffectKind.QUARANTINE,
-                payload={"entry_ids": list(quarantined)},
+                payload={"entry_ids": list(quarantined), "actor": actor},
+                actor=actor,
             )
         )
         return quarantined

@@ -35,6 +35,7 @@ class ActionType(StrEnum):
 
 PRIVILEGED_ACTIONS: set[ActionType] = {
     ActionType.APPROVE_PROMOTION,
+    ActionType.RUN_BENCHMARK,
     ActionType.ROLLBACK_CANARY,
     ActionType.RESTORE_MODULE,
     ActionType.REQUEST_PERMISSION_EXPANSION,

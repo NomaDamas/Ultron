@@ -122,7 +122,7 @@ def test_submit_request_benchmark_then_approve_promotion_advances_pointer():
     assert body["result"]["run_manifest"]["signature"]
     candidate_hash = body["candidate"]["content_hash"]
     assert "evaluation" not in body
-    benchmarked = client.post("/api/action", json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": candidate_hash, "canary_id": body["canary_id"]}})
+    benchmarked = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": candidate_hash, "canary_id": body["canary_id"]})
     assert benchmarked.status_code == 200
     assert benchmarked.json()["evaluation"]["report"]["promotable"] is True
     assert benchmarked.json()["evaluation"]["report"]["evidence_label"] == "benchmark_evidence"
