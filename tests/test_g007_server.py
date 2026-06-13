@@ -4,7 +4,7 @@ except ModuleNotFoundError:  # pragma: no cover
     TestClient = None
 
 from ultron.app.server import create_app
-from ultron.evaluation.harness import PairedTask
+from ultron.evaluation.harness import GuardrailMetrics, PairedTask
 from ultron.evolution.variation import VariationPrimitive
 
 
@@ -99,6 +99,8 @@ def test_non_promotable_evaluated_candidate_denies_without_pointer_change():
         candidate_hash,
         [PairedTask(task_id=f"negative-{i}", baseline_metric=1.0, candidate_metric=0.9) for i in range(10)],
         canary["canary_id"],
+        GuardrailMetrics(),
+        GuardrailMetrics(),
     )
     assert evaluation["report"].promotable is False
 
@@ -108,7 +110,7 @@ def test_non_promotable_evaluated_candidate_denies_without_pointer_change():
     assert engine.pointer_store.get(engine.pointer_key) == (before_version, before_active)
 
 
-def test_submit_request_creates_evaluates_and_approve_promotion_advances_pointer():
+def test_submit_request_benchmark_then_approve_promotion_advances_pointer():
     client = _client()
     csrf = _authed(client)
     engine = client.app.state.triage
@@ -119,8 +121,11 @@ def test_submit_request_creates_evaluates_and_approve_promotion_advances_pointer
     body = submitted.json()
     assert body["result"]["run_manifest"]["signature"]
     candidate_hash = body["candidate"]["content_hash"]
-    assert body["evaluation"]["report"]["promotable"] is True
-    assert body["evaluation"]["report"]["evidence_label"] == "benchmark_evidence"
+    assert "evaluation" not in body
+    benchmarked = client.post("/api/action", json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": candidate_hash, "canary_id": body["canary_id"]}})
+    assert benchmarked.status_code == 200
+    assert benchmarked.json()["evaluation"]["report"]["promotable"] is True
+    assert benchmarked.json()["evaluation"]["report"]["evidence_label"] == "benchmark_evidence"
     assert engine.current_pointer_version() == before
 
     approved = _privileged(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": candidate_hash})

@@ -10,6 +10,7 @@ from typing import Any
 from ultron.composition.resolver import CompositionResolver
 from ultron.hermes.adapter import AdapterRunRequest, AdapterRunResult, DeterministicFakeHermesAdapter, HermesAdapter
 from ultron.hermes.tool_policy import ToolPolicyCompiler
+from ultron.evaluation.benchmark import BenchmarkFixture, BenchmarkRunner, DEFAULT_CODE_TRIAGE_V0
 from ultron.evaluation.harness import EvaluationHarness, EvaluationReport, FrozenVersions, GuardrailMetrics, PairedTask
 from ultron.evolution.loop import EvolutionLoop, StabilityControls
 from ultron.evolution.selection import SelectionOutcome, SelectionThresholds, Selector
@@ -304,22 +305,74 @@ class TriageApp:
         self.last_canary_id = canary_id
         return {"candidate": candidate, "proposal": proposal, "canary_id": canary_id, "candidate_run": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec, "mutation_diff": change}
 
-    def evaluate_and_decide(self, candidate_hash: str, paired_tasks: list[PairedTask], canary_id: str | None = None) -> dict[str, Any]:
+    def evaluate_and_decide(
+        self,
+        candidate_hash: str,
+        paired_tasks: list[PairedTask],
+        canary_id: str | None = None,
+        guardrails_before: GuardrailMetrics | None = None,
+        guardrails_after: GuardrailMetrics | None = None,
+    ) -> dict[str, Any]:
         canary_id = canary_id or self.last_canary_id or f"canary-{candidate_hash[:12]}"
+        before = guardrails_before or GuardrailMetrics()
+        after = guardrails_after or GuardrailMetrics()
         report = self.evaluation_harness.evaluate_paired(
             candidate_hash,
             "PROMPT_SLOT_EDIT",
             self.frozen_versions,
             paired_tasks,
-            GuardrailMetrics(),
-            GuardrailMetrics(),
+            before,
+            after,
         )
-        outcome = self.selector.evaluate(candidate_hash, 1.0, 1.0 + report.mean_primary_delta, report.paired_tasks, {}, {})
+        outcome = self.selector.evaluate(
+            candidate_hash,
+            1.0,
+            1.0 + report.mean_primary_delta,
+            report.paired_tasks,
+            before.model_dump(),
+            after.model_dump(),
+        )
         self.evaluated_candidates[candidate_hash] = {"report": report, "outcome": outcome, "canary_id": canary_id}
         if not report.promotable:
             self.evolution_loop.mark_rollback(candidate_hash)
             self.registry.set_lifecycle(candidate_hash, ModuleLifecycle.DECAYING)
         return {"report": report, "outcome": outcome, "promotable": report.promotable, "canary_id": canary_id}
+
+    def benchmark_and_decide(self, candidate_hash: str, fixture: BenchmarkFixture | None = None, canary_id: str | None = None) -> dict[str, Any]:
+        self.seed_baseline()
+        try:
+            self.registry.get(candidate_hash)
+        except KeyError as exc:
+            raise PolicyDenied("candidate module is not registered") from exc
+        fixture = fixture or DEFAULT_CODE_TRIAGE_V0
+        _, active = self.pointer_store.get(self.pointer_key)
+        baseline_hashes = [hash_value for hash_value in active if hash_value != candidate_hash]
+        if not baseline_hashes:
+            baseline_hashes = list(active)
+        candidate_hashes = list(baseline_hashes) + [candidate_hash]
+        runner = BenchmarkRunner(self.adapter, self._benchmark_request)
+        paired_tasks = runner.run_paired(baseline_hashes, candidate_hashes, fixture)
+        return self.evaluate_and_decide(
+            candidate_hash,
+            paired_tasks,
+            canary_id or self.last_canary_id,
+            runner.guardrails_before,
+            runner.guardrails_after,
+        )
+
+    def _benchmark_request(self, module_hashes: list[str], task: Any, side: str) -> AdapterRunRequest:
+        manifest = self.resolver.resolve(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "triage", module_hashes, {item.value for item in self.ui_registry})
+        return self._build_adapter_request(
+            manifest,
+            run_id=uuid.uuid5(uuid.NAMESPACE_URL, f"benchmark:{side}:{task.task_id}:{','.join(module_hashes)}").hex,
+            session_id=uuid.uuid5(uuid.NAMESPACE_URL, f"benchmark-session:{side}:{task.task_id}:{','.join(module_hashes)}").hex,
+            active_module_set_id=f"{DEFAULT_SCOPE}:{DEFAULT_WORKFLOW}:benchmark:{side}",
+            candidate_module_id=module_hashes[-1] if side == "candidate" and len(module_hashes) > 1 else None,
+            canary_id=None,
+            persistence_mode=PersistencePolicy.ISOLATED,
+            ui_spec_hash=None,
+            request_text=task.request_text,
+        )
 
     def has_promotable_evidence(self, candidate_hash: str) -> bool:
         stored = self.evaluated_candidates.get(candidate_hash)

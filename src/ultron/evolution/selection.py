@@ -12,6 +12,9 @@ class SelectionThresholds(BaseModel):
     min_primary_improvement: float = 0.10
     guardrail_tolerance: dict[str, float] = Field(default_factory=dict)
 
+    def snapshot(self) -> "SelectionThresholds":
+        return self.model_copy(deep=True)
+
 PROMOTABLE_EVIDENCE_LABELS = {EvidenceLabel.BENCHMARK, EvidenceLabel.CAUSAL_SUFFICIENT}
 
 
@@ -41,6 +44,7 @@ class SelectionOutcome(BaseModel):
     guardrail_breaches: list[str]
     promotable: bool
     rationale: str
+    thresholds: SelectionThresholds = Field(default_factory=SelectionThresholds)
 
     @model_validator(mode="after")
     def _promotable_matches_fields(self) -> "SelectionOutcome":
@@ -49,7 +53,7 @@ class SelectionOutcome(BaseModel):
             primary_delta=self.primary_delta,
             paired_tasks=self.paired_tasks,
             guardrail_breaches=self.guardrail_breaches,
-            thresholds=SelectionThresholds(),
+            thresholds=self.thresholds,
         )
         if self.promotable != derived:
             raise ValueError("promotable must be derived from evidence label, thresholds, and guardrails")
@@ -104,6 +108,7 @@ class Selector:
             guardrail_breaches=breaches,
             promotable=promotable,
             rationale=rationale,
+            thresholds=self.thresholds.snapshot(),
         )
 
     def _guardrail_breaches(

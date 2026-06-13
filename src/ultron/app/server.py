@@ -13,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, PolicyDenied, TriageApp
-from ultron.evaluation.harness import PairedTask
 from ultron.evolution.variation import VariationPrimitive
 from ultron.ui.runtime import ActionCommand, ActionType, validate_action
 
@@ -84,12 +83,16 @@ def create_app() -> FastAPI:
             result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text)
             canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text)
             candidate_hash = canary["candidate"].content_hash or ""
-            evaluation = engine.evaluate_and_decide(
-                candidate_hash,
-                [PairedTask(task_id=f"submit-{i}", baseline_metric=1.0, candidate_metric=1.2) for i in range(10)],
-                canary["canary_id"],
-            )
-            return _jsonable({"ok": True, "result": result, "candidate": canary["candidate"], "canary_id": canary["canary_id"], "evaluation": evaluation})
+            return _jsonable({"ok": True, "result": result, "candidate": canary["candidate"], "canary_id": canary["canary_id"]})
+        if cmd.type is ActionType.RUN_BENCHMARK:
+            candidate_hash = str(cmd.payload.get("candidate_hash") or engine.last_candidate_hash or "")
+            if not candidate_hash:
+                raise HTTPException(status_code=403, detail="candidate benchmark requires a candidate")
+            try:
+                evaluation = engine.benchmark_and_decide(candidate_hash, canary_id=str(cmd.payload.get("canary_id") or engine.last_canary_id or ""))
+            except (KeyError, PermissionError, ValueError) as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            return _jsonable({"ok": True, "evaluation": evaluation})
         if cmd.type is ActionType.GIVE_FEEDBACK:
             event = engine.submit_feedback(str(cmd.payload.get("run_id", engine.last_manifest.run_id if engine.last_manifest else "run")), int(cmd.payload.get("rating", 1)), str(cmd.payload.get("comment", "")))
             return _jsonable({"ok": True, "feedback": event})

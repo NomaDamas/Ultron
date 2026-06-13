@@ -1,5 +1,5 @@
 from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, TriageApp
-from ultron.evaluation.harness import PairedTask
+from ultron.evaluation.harness import GuardrailMetrics, PairedTask
 from ultron.evolution.variation import VariationPrimitive
 from ultron.module.blobs import BlobKind, PromptPack
 from ultron.registry.store import ModuleLifecycle
@@ -26,11 +26,7 @@ def test_full_triage_loop_seed_run_canary_promote_rollback_atrophy_restore():
     assert isinstance(prompt_blob, PromptPack)
     assert prompt_blob.content_hash() == canary["candidate"].prompt_pack_hash
 
-    decision = app.evaluate_and_decide(
-        candidate_hash,
-        [PairedTask(task_id=f"good-{i}", baseline_metric=1.0, candidate_metric=1.2) for i in range(10)],
-        canary["canary_id"],
-    )
+    decision = app.benchmark_and_decide(candidate_hash, canary_id=canary["canary_id"])
     assert decision["promotable"] is True
     assert decision["report"].promotable is True
     approved = app.approve_promotion(candidate_hash, app.current_pointer_version())
@@ -45,6 +41,8 @@ def test_full_triage_loop_seed_run_canary_promote_rollback_atrophy_restore():
         bad_hash,
         [PairedTask(task_id=f"bad-{i}", baseline_metric=1.0, candidate_metric=0.95) for i in range(10)],
         bad["canary_id"],
+        GuardrailMetrics(),
+        GuardrailMetrics(),
     )
     assert bad_decision["promotable"] is False
     rollback = app.rollback_controller.rollback(bad["canary_id"])
