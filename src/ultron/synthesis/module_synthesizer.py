@@ -122,6 +122,10 @@ def validate_synthesized_module(
     parent: HarnessModule | None,
     registry: ModuleRegistry | None,
 ) -> HarnessModule:
+    declared_hash = module.content_hash
+    recomputed_hash = module.compute_content_hash()
+    if declared_hash is not None and declared_hash != recomputed_hash:
+        raise ValueError("synthesized module content hash mismatch")
     candidate = module.finalized()
     ModuleSurfaceContract.validated(candidate.surfaces.model_dump(), adapter_contract)
     candidate.validate_surfaces(adapter_contract)
@@ -129,8 +133,6 @@ def validate_synthesized_module(
         raise PermissionError("synthesized module requires human approval for permission expansion")
     if registry is not None and parent is not None and not registry.can_auto_promote(candidate):
         raise PermissionError("synthesized module is not auto-promotable")
-    if candidate.content_hash != candidate.compute_content_hash():
-        raise ValueError("synthesized module content hash mismatch")
     return candidate
 
 

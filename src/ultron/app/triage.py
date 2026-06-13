@@ -21,7 +21,7 @@ from ultron.feedback.channel import ConsentClass, FeedbackChannel, FeedbackEvent
 from ultron.feedback.aggregation import FeedbackAggregator, FeedbackSummary, canonical_rating_payload
 from ultron.module.contract import load_default_contract
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
-from ultron.synthesis.module_synthesizer import DeterministicFakeModuleSynthesizer, SynthesisContext, SynthesisPolicyConstraints
+from ultron.synthesis.module_synthesizer import DeterministicFakeModuleSynthesizer, SynthesisContext, SynthesisPolicyConstraints, validate_synthesized_module
 from ultron.ledger.canary_store import CanaryScopedStore, RollbackController
 from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind, SideEffectLedger
 from ultron.module.blobs import BlobStore, BudgetPolicyBlob, PromptPack, SafetyPolicyBlob, ToolPolicyBlob, UiPanelContract
@@ -33,7 +33,7 @@ from ultron.run.manifest import RunManifest
 from ultron.persistence.db import Database
 from ultron.persistence.sqlite_stores import SqliteActivePointerStore, SqliteBlobStore, SqliteEvaluatedCandidateStore, SqliteFeedbackChannel, SqliteModuleRegistry, SqliteSideEffectLedger
 from ultron.run.signer import EnvKeyProvider, FixtureKeyProvider, ManifestSigner
-from ultron.ui.generator import DeterministicFakeUiSpecGenerator, UiGenContext
+from ultron.ui.generator import DeterministicFakeUiSpecGenerator, UiGenContext, validate_generated_uispec
 from ultron.ui.runtime import ComponentType, UiSpec
 
 
@@ -465,7 +465,12 @@ class TriageApp:
             eval_summary=self.evaluated_candidates.get(parent_hash),
             policy_constraints=SynthesisPolicyConstraints(allowed_surfaces=parent.surfaces, no_permission_expansion=True),
         )
-        candidate = self.module_synthesizer.synthesize(context)
+        candidate = validate_synthesized_module(
+            self.module_synthesizer.synthesize(context),
+            self.adapter_contract,
+            parent=parent,
+            registry=self.registry,
+        )
         candidate_hash = candidate.content_hash or ""
         canary_id = f"canary-{candidate_hash[:12]}"
         self.registry.register(candidate, ModuleLifecycle.CANDIDATE, "canary", human_approved_additive=False)
@@ -626,7 +631,7 @@ class TriageApp:
         return {"module_hash": target, "pruned": pruned, "restored": restored}
 
     def _generate_uispec(self, manifest: Any, request_class: str, run_output_summary: dict[str, Any] | None = None) -> UiSpec:
-        return self.ui_generator.generate(
+        generated = self.ui_generator.generate(
             UiGenContext(
                 module_set_manifest=manifest,
                 request_class=request_class,
@@ -634,6 +639,7 @@ class TriageApp:
                 allowed_registry=sorted(self.ui_registry, key=lambda item: item.value),
             )
         )
+        return validate_generated_uispec(generated, self.ui_registry)
     def _build_adapter_request(
         self,
         manifest: Any,
