@@ -68,6 +68,7 @@ class TriageApp:
         )
         self.feedback_channel = FeedbackChannel()
         self.adapter = adapter or DeterministicFakeHermesAdapter()
+        self.allow_manual_promotable_evidence = False
         self.evaluation_harness = EvaluationHarness(self.selector, self.thresholds)
         self.frozen_versions = FrozenVersions(
             hermes_version="pinned-hermes-ref",
@@ -312,6 +313,7 @@ class TriageApp:
         canary_id: str | None = None,
         guardrails_before: GuardrailMetrics | None = None,
         guardrails_after: GuardrailMetrics | None = None,
+        provenance: str = "manual",
     ) -> dict[str, Any]:
         canary_id = canary_id or self.last_canary_id or f"canary-{candidate_hash[:12]}"
         before = guardrails_before or GuardrailMetrics()
@@ -323,6 +325,7 @@ class TriageApp:
             paired_tasks,
             before,
             after,
+            provenance=provenance,
         )
         outcome = self.selector.evaluate(
             candidate_hash,
@@ -352,12 +355,15 @@ class TriageApp:
         candidate_hashes = list(baseline_hashes) + [candidate_hash]
         runner = BenchmarkRunner(self.adapter, self._benchmark_request)
         paired_tasks = runner.run_paired(baseline_hashes, candidate_hashes, fixture)
+        for result in runner.results:
+            self._validate_live_adapter_result(result)
         return self.evaluate_and_decide(
             candidate_hash,
             paired_tasks,
             canary_id or self.last_canary_id,
             runner.guardrails_before,
             runner.guardrails_after,
+            provenance="benchmark_runner",
         )
 
     def _benchmark_request(self, module_hashes: list[str], task: Any, side: str) -> AdapterRunRequest:
@@ -381,7 +387,8 @@ class TriageApp:
         report = stored["report"]
         outcome = stored["outcome"]
         return bool(
-            report.evidence_label in PROMOTABLE_EVIDENCE_LABELS
+            (report.provenance == "benchmark_runner" or self.allow_manual_promotable_evidence)
+            and report.evidence_label in PROMOTABLE_EVIDENCE_LABELS
             and report.promotable
             and outcome.promotable
         )
@@ -533,7 +540,9 @@ def build_durable_triage_app(db_path: str, *, signer: ManifestSigner | None = No
 def build_durable_triage_app_for_tests(db_path: str, *, signer: ManifestSigner | None = None) -> TriageApp:
     """Build a durable app with an explicit fixture signer for tests and local fixtures only."""
     fixture_signer = signer or ManifestSigner.from_provider("fixture-dev", FixtureKeyProvider({"fixture-dev": "ultron-dev-run-manifest-key"}))
-    return _build_durable_triage_app(db_path, signer=fixture_signer)
+    app = _build_durable_triage_app(db_path, signer=fixture_signer)
+    app.allow_manual_promotable_evidence = True
+    return app
 
 
 def _build_durable_triage_app(db_path: str, *, signer: ManifestSigner) -> TriageApp:

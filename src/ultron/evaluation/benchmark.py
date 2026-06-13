@@ -21,6 +21,12 @@ class BenchmarkTask(BaseModel):
     weight: float = 1.0
 
 
+def _issue_keywords(request: str) -> list[str]:
+    stopwords = {"a", "an", "the", "for", "with", "while", "after", "only", "and", "or", "in", "on", "to", "of"}
+    words = [word.strip(".,:;!?()[]{}'").lower() for word in request.split()]
+    return [word for word in words if len(word) >= 4 and word not in stopwords][:3]
+
+
 class BenchmarkFixture(BaseModel):
     model_config = ConfigDict(use_enum_values=False)
 
@@ -30,7 +36,12 @@ class BenchmarkFixture(BaseModel):
 
     @classmethod
     def default_code_triage_v0(cls) -> "BenchmarkFixture":
-        keywords = ["Clarify", "scope", "Apply", "focused", "change", "Run", "targeted", "tests"]
+        criteria = {
+            "issue_keywords": [],
+            "requires_risk_section": True,
+            "requires_concrete_test": True,
+            "requires_actionable_reference": True,
+        }
         requests = [
             "Fix a flaky pytest that fails only on CI",
             "Add validation for an API payload without broad rewrites",
@@ -50,7 +61,7 @@ class BenchmarkFixture(BaseModel):
                 BenchmarkTask(
                     task_id=f"code-triage-v0-{index:02d}",
                     request_text=request,
-                    rubric={"keywords": keywords, "module_hash_count_at_least": 2},
+                    rubric={**criteria, "issue_keywords": _issue_keywords(request)},
                     weight=1.0,
                 )
                 for index, request in enumerate(requests, start=1)
@@ -74,14 +85,17 @@ class BenchmarkRunner:
         self.resolver_or_run_fn = resolver_or_run_fn
         self.guardrails_before = GuardrailMetrics()
         self.guardrails_after = GuardrailMetrics()
+        self.results: list[AdapterRunResult] = []
 
     def run_paired(self, baseline_module_set: Any, candidate_module_set: Any, fixture: BenchmarkFixture) -> list[PairedTask]:
         pairs: list[PairedTask] = []
+        self.results = []
         before = GuardrailMetrics()
         after = GuardrailMetrics()
         for task in fixture.tasks:
             baseline_result = self._execute(baseline_module_set, task, "baseline")
             candidate_result = self._execute(candidate_module_set, task, "candidate")
+            self.results.extend([baseline_result, candidate_result])
             before = _add_guardrails(before, _guardrails_from_result(baseline_result))
             after = _add_guardrails(after, _guardrails_from_result(candidate_result))
             pairs.append(
@@ -96,23 +110,25 @@ class BenchmarkRunner:
         return pairs
 
     def _execute(self, module_set: Any, task: BenchmarkTask, side: str) -> AdapterRunResult:
-        request_or_result = self.resolver_or_run_fn(module_set, task, side)  # type: ignore[misc]
-        if isinstance(request_or_result, AdapterRunResult):
-            return request_or_result
-        if not isinstance(request_or_result, AdapterRunRequest):
-            raise TypeError("benchmark resolver must return AdapterRunRequest or AdapterRunResult")
-        return self.adapter.run(request_or_result)
+        request = self.resolver_or_run_fn(module_set, task, side)  # type: ignore[misc]
+        if not isinstance(request, AdapterRunRequest):
+            raise TypeError("benchmark resolver must return AdapterRunRequest")
+        return self.adapter.run(request)
 
 
 def score_output(output: Any, rubric: dict[str, Any]) -> float:
     checks: list[bool] = []
-    keywords = [str(item).lower() for item in rubric.get("keywords", [])]
+    issue_keywords = rubric.get("issue_keywords")
+    keywords = [str(item).lower() for item in (issue_keywords if issue_keywords is not None else rubric.get("keywords", []))]
     text = _flatten_output(output).lower()
-    checks.extend(keyword in text for keyword in keywords)
-    min_module_hashes = rubric.get("module_hash_count_at_least")
-    if min_module_hashes is not None:
-        module_hashes = output.get("module_hashes", []) if isinstance(output, dict) else []
-        checks.append(len(module_hashes) >= int(min_module_hashes))
+    issue_text = _issue_reference_text(output).lower() if issue_keywords is not None else text
+    checks.extend(keyword in issue_text for keyword in keywords)
+    if rubric.get("requires_risk_section"):
+        checks.append(_section_has_content(text, "risk"))
+    if rubric.get("requires_concrete_test"):
+        checks.append(_has_concrete_test(text))
+    if rubric.get("requires_actionable_reference"):
+        checks.append(_has_actionable_reference(text))
     if not checks:
         return 0.0
     return sum(1 for passed in checks if passed) / len(checks)
@@ -128,6 +144,33 @@ def _flatten_output(output: Any) -> str:
     if isinstance(output, list):
         return "\n".join(_flatten_output(item) for item in output)
     return str(output)
+
+def _issue_reference_text(output: Any) -> str:
+    if isinstance(output, dict):
+        values = [output.get("issue"), output.get("issue_reference"), output.get("task_issue")]
+        return "\n".join(str(value) for value in values if value)
+    return _flatten_output(output)
+
+
+
+def _section_has_content(text: str, section: str) -> bool:
+    marker = f"{section}:"
+    if marker not in text:
+        marker = f"{section} "
+    index = text.find(marker)
+    if index < 0:
+        return False
+    rest = text[index + len(marker):].strip()
+    first_line = rest.splitlines()[0].strip() if rest else ""
+    return bool(first_line and first_line not in {"[]", "{}"})
+
+
+def _has_concrete_test(text: str) -> bool:
+    return "test" in text and any(token in text for token in ("pytest", "tests/", "assert", "unit", "e2e"))
+
+
+def _has_actionable_reference(text: str) -> bool:
+    return any(token in text for token in ("src/", "tests/", ".py", "::", "function", "method"))
 
 
 def _guardrails_from_result(result: AdapterRunResult) -> GuardrailMetrics:

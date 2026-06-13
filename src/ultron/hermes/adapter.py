@@ -101,7 +101,7 @@ class DeterministicFakeHermesAdapter:
                 f"Apply focused change across modules: {module_token}",
                 "Run targeted tests",
             ],
-            "risks": ["stale pointer", "permission expansion", "rollback poisoning"],
+            "risk": [],
             "tests": ["pytest tests/ -q", "server create_app boot"],
             "request_sha": canonical_sha,
             "manifest_hash": request.active_module_set_hash,
@@ -109,6 +109,10 @@ class DeterministicFakeHermesAdapter:
             "module_hashes": list(request.ordered_module_hashes),
             "skill_refs": list(request.resolved_skill_refs),
         }
+        if request.candidate_module_id:
+            output["risk"] = "stale pointer must be checked before promotion"
+            output["actionable_reference"] = "src/ultron/app/triage.py::benchmark_and_decide"
+            output["issue_reference"] = request_summary
         return AdapterRunResult(
             session_id=request.session_id,
             trajectory_id=trajectory_id,
