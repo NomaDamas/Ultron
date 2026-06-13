@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 from typing import Any
+from dataclasses import dataclass
+
 
 from pydantic import BaseModel
 
@@ -18,6 +20,44 @@ class StabilityControls(BaseModel):
     diversity_floor: int = 2
     promotion_cooldown_s: float = 0
     prune_cooldown_s: float = 0
+
+@dataclass(frozen=True)
+class ActiveSetTransitionPlan:
+    new_active: list[str]
+    evicted: list[str]
+
+
+def plan_active_set_transition(
+    registry: ModuleRegistry,
+    candidate_hash: str,
+    active_hashes: list[str],
+    active_module_cap: int,
+) -> ActiveSetTransitionPlan:
+    new_active = list(active_hashes)
+    if candidate_hash not in new_active:
+        new_active.append(candidate_hash)
+    evicted: list[str] = []
+    while len(new_active) > active_module_cap:
+        evict = _eviction_candidate(registry, new_active, protected={candidate_hash})
+        if evict is None:
+            raise ValueError("active module cap cannot be satisfied without evicting protected candidate")
+        new_active.remove(evict)
+        evicted.append(evict)
+    return ActiveSetTransitionPlan(new_active=new_active, evicted=evicted)
+
+
+def _eviction_candidate(registry: ModuleRegistry, active_hashes: list[str], protected: set[str]) -> str | None:
+    candidates = [h for h in active_hashes if h not in protected]
+    if not candidates:
+        return None
+
+    def score(module_hash: str) -> tuple[float, float]:
+        entry = registry.get(module_hash)
+        primary = entry.module.fitness.primary_metric
+        metric = primary if primary is not None else float("-inf")
+        return (metric - entry.module.fitness.decay_score, entry.created_at)
+
+    return min(candidates, key=score)
 
 
 class EvolutionLoop:
@@ -69,16 +109,9 @@ class EvolutionLoop:
         version, active = self.pointer_store.get(key)
         if version != expected_version:
             raise ValueError("stale active pointer version")
-        new_active = list(active)
-        if candidate_hash not in new_active:
-            new_active.append(candidate_hash)
-        evicted: list[str] = []
-        while len(new_active) > self.controls.active_module_cap:
-            evict = self._eviction_candidate(new_active, protected={candidate_hash})
-            if evict is None:
-                raise ValueError("active module cap cannot be satisfied without evicting protected candidate")
-            new_active.remove(evict)
-            evicted.append(evict)
+        plan = plan_active_set_transition(self.registry, candidate_hash, active, self.controls.active_module_cap)
+        new_active = plan.new_active
+        evicted = plan.evicted
         for module_hash in evicted:
             self._validate_prune_allowed(module_hash, new_active)
         self.pointer_store.swap(key, expected_version, new_active)
@@ -147,14 +180,9 @@ class EvolutionLoop:
         if module_hash in active:
             self.registry.set_lifecycle(module_hash, ModuleLifecycle.SURVIVOR)
             return False
-        new_active = list(active) + [module_hash]
-        evicted: list[str] = []
-        while len(new_active) > self.controls.active_module_cap:
-            evict = self._eviction_candidate(new_active, protected={module_hash})
-            if evict is None:
-                raise ValueError("active module cap cannot be satisfied")
-            new_active.remove(evict)
-            evicted.append(evict)
+        plan = plan_active_set_transition(self.registry, module_hash, active, self.controls.active_module_cap)
+        new_active = plan.new_active
+        evicted = plan.evicted
         for evict in evicted:
             self._validate_prune_allowed(evict, new_active)
         self.pointer_store.swap(key, expected_version, new_active)
@@ -203,15 +231,7 @@ class EvolutionLoop:
         return last is not None and now - last < self.controls.prune_cooldown_s
 
     def _eviction_candidate(self, active_hashes: list[str], protected: set[str]) -> str | None:
-        candidates = [h for h in active_hashes if h not in protected]
-        if not candidates:
-            return None
-        def score(module_hash: str) -> tuple[float, float]:
-            entry = self.registry.get(module_hash)
-            primary = entry.module.fitness.primary_metric
-            metric = primary if primary is not None else float("-inf")
-            return (metric - entry.module.fitness.decay_score, entry.created_at)
-        return min(candidates, key=score)
+        return _eviction_candidate(self.registry, active_hashes, protected)
 
     def _active_keys_containing(self, module_hash: str) -> list[tuple[str, str]]:
         pointers = getattr(self.pointer_store, "_pointers", {})

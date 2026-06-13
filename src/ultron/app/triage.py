@@ -347,17 +347,16 @@ class TriageApp:
             raise PolicyDenied("candidate module is not registered") from exc
         if isinstance(self.pointer_store, SqliteActivePointerStore) and isinstance(self.registry, SqliteModuleRegistry) and isinstance(self.ledger, SqliteSideEffectLedger):
             from ultron.persistence.unit_of_work import PromotionUnitOfWork
+            active_module_cap = self.evolution_loop.controls.active_module_cap
             _, active = self.pointer_store.get(self.pointer_key)
-            new_active = list(active)
-            if candidate_hash not in new_active:
-                new_active.append(candidate_hash)
             PromotionUnitOfWork(self.pointer_store.db, self.registry, self.pointer_store, self.ledger).promote(
                 candidate_hash,
                 expected_pointer_version,
-                new_active,
+                list(active),
                 evidence_id=report.frozen_versions_hash,
                 actor="triage-app",
                 key=self.pointer_key,
+                active_module_cap=active_module_cap,
             )
             retained = True
         else:

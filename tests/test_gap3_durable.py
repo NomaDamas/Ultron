@@ -11,6 +11,8 @@ from ultron.module.blobs import BlobKind, PromptPack, ToolPolicyBlob
 from ultron.persistence.db import Database
 from ultron.persistence.sqlite_stores import SqliteActivePointerStore, SqliteBlobStore, SqliteModuleRegistry, SqliteSideEffectLedger
 from ultron.persistence.unit_of_work import PromotionUnitOfWork
+from ultron.evolution.loop import plan_active_set_transition
+
 from ultron.registry.store import ModuleLifecycle
 from ultron.run.manifest import RunManifest
 from ultron.run.signer import EnvKeyProvider, FixtureKeyProvider, ManifestSigner
@@ -22,6 +24,18 @@ class FailingLedger(SqliteSideEffectLedger):
     def _append_in_tx(self, cur, entry):
         super()._append_in_tx(cur, entry)
         raise RuntimeError('injected ledger failure')
+
+class FailingAfterEvictionLedger(SqliteSideEffectLedger):
+    def __init__(self, db, evicted_hash):
+        super().__init__(db)
+        self.evicted_hash = evicted_hash
+
+    def _append_in_tx(self, cur, entry):
+        if self.evicted_hash in entry.payload.get('evicted_hashes', []):
+            super()._append_in_tx(cur, entry)
+            raise RuntimeError('injected eviction ledger failure')
+        return super()._append_in_tx(cur, entry)
+
 
 
 def _snapshot(app, module_hash):
@@ -142,6 +156,78 @@ def test_atomic_promotion_prune_restore_rollback_on_ledger_failure(tmp_path):
     with pytest.raises(RuntimeError, match='injected ledger failure'):
         uow.restore(h, pruned[1][0], pruned[1][1] + [h], 'evidence-restore-fail', 'tester')
     _assert_snapshot(app, h, pruned)
+
+def test_durable_promotion_cap_eviction_matches_in_memory_and_is_reversible(tmp_path):
+    app = build_durable_triage_app_for_tests(str(tmp_path / 'cap.sqlite'))
+    app.seed_baseline()
+    promoted = []
+    expected_active = list(app.pointer_store.get(app.pointer_key)[1])
+    evicted_by_plan = []
+    for i in range(3):
+        canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': f'candidate-cap-{i}'})
+        h = canary['candidate'].content_hash
+        app.evaluate_and_decide(h, _tasks(), canary['canary_id'])
+        plan = plan_active_set_transition(app.registry, h, expected_active, app.evolution_loop.controls.active_module_cap)
+        expected_active = plan.new_active
+        evicted_by_plan.extend(plan.evicted)
+        app.approve_promotion(h, app.current_pointer_version())
+        promoted.append(h)
+        assert len(app.pointer_store.get(app.pointer_key)[1]) <= app.evolution_loop.controls.active_module_cap
+
+    _, active = app.pointer_store.get(app.pointer_key)
+    assert active == expected_active
+    assert promoted[-1] in active
+    evicted_hash = evicted_by_plan[0]
+    assert evicted_hash not in active
+    assert app.registry.get(evicted_hash).lifecycle is ModuleLifecycle.PRUNED
+    assert all(app.registry.get(h).lifecycle is ModuleLifecycle.SURVIVOR for h in active)
+    eviction_entries = [
+        entry for entry in app.ledger.promotable_entries()
+        if entry.payload.get('action') == 'promote' and evicted_hash in entry.payload.get('evicted_hashes', [])
+    ]
+    assert eviction_entries
+
+    before_restore_version = app.current_pointer_version()
+    app.atrophy_and_restore(evicted_hash)
+    _, restored_active = app.pointer_store.get(app.pointer_key)
+    assert app.current_pointer_version() == before_restore_version + 2
+    assert evicted_hash in restored_active
+    assert len(restored_active) <= app.evolution_loop.controls.active_module_cap
+    assert app.registry.get(evicted_hash).lifecycle is ModuleLifecycle.SURVIVOR
+
+
+def test_durable_promotion_with_eviction_rolls_back_all_state_on_mid_tx_failure(tmp_path):
+    app = build_durable_triage_app_for_tests(str(tmp_path / 'cap-midfail.sqlite'))
+    baseline = app.seed_baseline()
+    canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': 'candidate-cap-midfail-0'})
+    first = canary['candidate'].content_hash
+    app.evaluate_and_decide(first, _tasks(), canary['canary_id'])
+    app.approve_promotion(first, app.current_pointer_version())
+    canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': 'candidate-cap-midfail-1'})
+    second = canary['candidate'].content_hash
+    app.evaluate_and_decide(second, _tasks(), canary['canary_id'])
+    report = app.evaluated_candidates.get(second)['report']
+    before_pointer = app.pointer_store.get(app.pointer_key)
+    evicted_hash = plan_active_set_transition(app.registry, second, before_pointer[1], app.evolution_loop.controls.active_module_cap).evicted[0]
+    before_lifecycles = {h: app.registry.get(h).lifecycle for h in [baseline.content_hash, first, second, evicted_hash]}
+    before_ledger = len(app.ledger.promotable_entries())
+    failing = FailingAfterEvictionLedger(app.db, evicted_hash)
+    uow = PromotionUnitOfWork(app.db, app.registry, app.pointer_store, failing)
+
+    with pytest.raises(RuntimeError, match='injected eviction ledger failure'):
+        uow.promote(
+            second,
+            before_pointer[0],
+            before_pointer[1],
+            report.frozen_versions_hash,
+            'tester',
+            key=app.pointer_key,
+            active_module_cap=app.evolution_loop.controls.active_module_cap,
+        )
+
+    assert app.pointer_store.get(app.pointer_key) == before_pointer
+    assert {h: app.registry.get(h).lifecycle for h in [baseline.content_hash, first, second, evicted_hash]} == before_lifecycles
+    assert len(app.ledger.promotable_entries()) == before_ledger
 
 
 def test_durable_atrophy_restore_uses_uow_and_ledgers_both_transitions(tmp_path):
