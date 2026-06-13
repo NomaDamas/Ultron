@@ -481,7 +481,18 @@ class TriageApp:
                 continue
             if isinstance(self.pointer_store, SqliteActivePointerStore) and isinstance(self.registry, SqliteModuleRegistry) and isinstance(self.ledger, SqliteSideEffectLedger):
                 from ultron.persistence.unit_of_work import PromotionUnitOfWork
-                PromotionUnitOfWork(self.pointer_store.db, self.registry, self.pointer_store, self.ledger).prune(module_hash, current_version, new_active, f"atrophy-{int(now)}", "triage-app", key=self.pointer_key)
+                PromotionUnitOfWork(self.pointer_store.db, self.registry, self.pointer_store, self.ledger).prune(
+                    module_hash,
+                    current_version,
+                    new_active,
+                    f"atrophy-{int(now)}",
+                    "triage-app",
+                    key=self.pointer_key,
+                    is_critical_seed=module_hash in self.evolution_loop._critical_seeds,
+                    approved=False,
+                    diversity_floor=self.evolution_loop.controls.diversity_floor,
+                    current_active_hashes=current_active,
+                )
                 pruned.append(module_hash)
             elif self.evolution_loop.prune(module_hash):
                 self._append_ledger(f"atrophy-{int(now)}", module_hash, module_hash, None, SideEffectKind.POINTER_TRANSITION, {"action": "atrophy_prune", "prior_version": current_version, "prior_hashes": current_active, "new_hashes": new_active})
@@ -549,7 +560,18 @@ class TriageApp:
             from ultron.persistence.unit_of_work import PromotionUnitOfWork
             uow = PromotionUnitOfWork(self.pointer_store.db, self.registry, self.pointer_store, self.ledger)
             pruned_active = [h for h in active if h != target]
-            pruned = uow.prune(target, version, pruned_active, uuid.uuid4().hex, "triage-app", key=self.pointer_key) is not None
+            pruned = uow.prune(
+                target,
+                version,
+                pruned_active,
+                uuid.uuid4().hex,
+                "triage-app",
+                key=self.pointer_key,
+                is_critical_seed=target in self.evolution_loop._critical_seeds,
+                approved=True,
+                diversity_floor=self.evolution_loop.controls.diversity_floor,
+                current_active_hashes=active,
+            ) is not None
             restore_version, restore_active = self.pointer_store.get(self.pointer_key)
             restored_active = list(restore_active)
             if target not in restored_active:

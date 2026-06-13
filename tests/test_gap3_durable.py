@@ -17,7 +17,7 @@ from ultron.evolution.loop import plan_active_set_transition
 from ultron.registry.store import ModuleLifecycle
 from ultron.run.manifest import RunManifest
 from ultron.run.signer import EnvKeyProvider, FixtureKeyProvider, ManifestSigner
-from ultron.module.model import PersistencePolicy
+from ultron.module.model import FitnessMetadata, PersistencePolicy, PromotionState
 from ultron.composition.manifest import ModuleSetManifest
 
 
@@ -259,6 +259,108 @@ def test_durable_atrophy_restore_uses_uow_and_ledgers_both_transitions(tmp_path)
     assert all(entry.kind is SideEffectKind.POINTER_TRANSITION for entry in entries)
     assert app.registry.get(h).lifecycle is ModuleLifecycle.SURVIVOR
     assert h in app.pointer_store.get(app.pointer_key)[1]
+
+
+def test_durable_run_atrophy_scan_prunes_reversibly_ledgers_and_preserves_floor_and_critical_seed(tmp_path):
+    app = build_durable_triage_app_for_tests(str(tmp_path / 'scan.sqlite'))
+    app.evolution_loop.controls.diversity_floor = 2
+    app.evolution_loop.controls.active_module_cap = 3
+    app.evolution_loop.controls.prune_cooldown_s = 0
+    app.seed_baseline()
+    candidates = []
+    for idx in range(2):
+        canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': f'candidate-scan-{idx}'})
+        module_hash = canary['candidate'].content_hash
+        app.benchmark_and_decide(module_hash, _fixture(), canary['canary_id'])
+        app.approve_promotion(module_hash, app.current_pointer_version())
+        candidate = app.registry.get(module_hash).module.model_copy(
+            update={
+                'fitness': FitnessMetadata(
+                    primary_metric=-1.0,
+                    usage_count=0,
+                    last_used_at=1.0,
+                    decay_score=1.0,
+                    promotion_state=PromotionState.CANDIDATE,
+                )
+            },
+            deep=True,
+        )
+        app._store_fitness_update(module_hash, candidate)
+        candidates.append(module_hash)
+
+    critical = app.pointer_store.get(app.pointer_key)[1][0]
+    app.evolution_loop.mark_critical_seed(critical)
+    before_count = len(app.ledger.promotable_entries())
+    result = app.run_atrophy_scan(1000.0)
+    _, active_after = app.pointer_store.get(app.pointer_key)
+    entries = app.ledger.promotable_entries()[before_count:]
+
+    assert result['pruned'] == [candidates[0]]
+    assert candidates[0] not in active_after
+    assert candidates[1] in active_after
+    assert critical in active_after
+    assert len(active_after) == app.evolution_loop.controls.diversity_floor
+    assert app.registry.get(candidates[0]).lifecycle is ModuleLifecycle.PRUNED
+    assert [entry.payload['action'] for entry in entries] == ['prune']
+    assert entries[0].kind is SideEffectKind.POINTER_TRANSITION
+    assert entries[0].payload['prior_hashes'] != entries[0].payload['new_hashes']
+
+    restore_version, restore_active = app.pointer_store.get(app.pointer_key)
+    restored_active = restore_active + [candidates[0]]
+    PromotionUnitOfWork(app.db, app.registry, app.pointer_store, app.ledger).restore(
+        candidates[0],
+        restore_version,
+        restored_active,
+        'scan-restore',
+        'tester',
+        key=app.pointer_key,
+    )
+    assert candidates[0] in app.pointer_store.get(app.pointer_key)[1]
+    assert app.registry.get(candidates[0]).lifecycle is ModuleLifecycle.SURVIVOR
+
+
+def test_durable_uow_prune_revalidates_floor_and_critical_seed_without_mutation(tmp_path):
+    app = build_durable_triage_app_for_tests(str(tmp_path / 'scan-defense.sqlite'))
+    app.seed_baseline()
+    canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': 'candidate-defense'})
+    module_hash = canary['candidate'].content_hash
+    app.benchmark_and_decide(module_hash, _fixture(), canary['canary_id'])
+    app.approve_promotion(module_hash, app.current_pointer_version())
+    uow = PromotionUnitOfWork(app.db, app.registry, app.pointer_store, app.ledger)
+
+    version, active = app.pointer_store.get(app.pointer_key)
+    app.evolution_loop.controls.diversity_floor = len(active)
+    before = _snapshot(app, module_hash)
+    with pytest.raises(ValueError, match='diversity floor'):
+        uow.prune(
+            module_hash,
+            version,
+            [h for h in active if h != module_hash],
+            'defense-floor',
+            'tester',
+            key=app.pointer_key,
+            diversity_floor=app.evolution_loop.controls.diversity_floor,
+            current_active_hashes=active,
+        )
+    _assert_snapshot(app, module_hash, before)
+
+    critical = active[0]
+    app.evolution_loop.controls.diversity_floor = 0
+    before = _snapshot(app, critical)
+    with pytest.raises(ValueError, match='critical seed'):
+        uow.prune(
+            critical,
+            version,
+            [h for h in active if h != critical],
+            'defense-critical',
+            'tester',
+            key=app.pointer_key,
+            is_critical_seed=True,
+            approved=False,
+            diversity_floor=app.evolution_loop.controls.diversity_floor,
+            current_active_hashes=active,
+        )
+    _assert_snapshot(app, critical, before)
 
 
 def test_append_only_quarantine_survives_restart(tmp_path):
