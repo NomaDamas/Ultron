@@ -51,6 +51,19 @@ def test_live_guard_rejects_before_start_run_manifest_or_ledger(adapter):
     assert not app.ledger.entries_for_run(adapter.requests[0].run_id)
 
 
+def test_live_guard_rejects_non_default_scope_without_pointer_bootstrap():
+    adapter = RejectingLiveAdapter(provider="stub", snapshot={"provider": "live-provider", "name": "clean-model"})
+    app = TriageApp(adapter=adapter)
+    app.seed_baseline()
+    key = ("non-default-user", "non-default-workflow")
+    assert app.pointer_store.get(key) == (0, [])
+    with pytest.raises(ValueError):
+        app.start_run(key[0], key[1], "reject non-default")
+    assert len(adapter.requests) == 1
+    assert app.pointer_store.get(key) == (0, [])
+    assert app.last_manifest is None
+    assert not app.ledger.entries_for_run(adapter.requests[0].run_id)
+
 @pytest.mark.parametrize(
     "adapter",
     [

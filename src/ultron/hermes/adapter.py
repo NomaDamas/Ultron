@@ -10,7 +10,6 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ultron.hermes.tool_policy import ToolPolicyCompiler
 from ultron.module.model import PersistencePolicy
 
 
@@ -33,7 +32,7 @@ class AdapterRunRequest(BaseModel):
     persistence_mode: PersistencePolicy
     isolated_root: str | None = None
     resolved_prompt_order: list[str]
-    resolved_tool_allowlist: list[str]
+    resolved_tool_allowlist: list[str] = Field(description="Hermes-native tool names compiled once by TriageApp._build_adapter_request.")
     resolved_skill_refs: list[str]
     budget_policy: dict[str, Any]
     safety_policy: dict[str, Any]
@@ -156,7 +155,7 @@ class PinnedHermesAdapter:
         return "hermes-pinned-ee1a744"
 
     def build_invocation_plan(self, request: AdapterRunRequest) -> HermesInvocationPlan:
-        compiled = ToolPolicyCompiler.compile(request.resolved_tool_allowlist)
+        hermes_tool_allowlist = list(request.resolved_tool_allowlist)
         isolated_home_path: str | None = None
         isolated_workspace_path: str | None = None
         if request.isolated_root:
@@ -171,7 +170,7 @@ class PinnedHermesAdapter:
                 "context": [request.user_scope, request.workflow_fingerprint, request.active_module_set_hash],
                 "skills": list(request.resolved_skill_refs),
             },
-            hermes_tool_allowlist=list(compiled.hermes_tools),
+            hermes_tool_allowlist=hermes_tool_allowlist,
             iteration_budget={
                 "max_tool_calls": request.budget_policy.get("max_tool_calls"),
                 "policy": dict(request.budget_policy),

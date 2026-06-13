@@ -141,9 +141,10 @@ class TriageApp:
     def start_run(self, user_scope: str, workflow_fingerprint: str, request_text: str) -> dict[str, Any]:
         self.seed_baseline()
         version, active = self.pointer_store.get((user_scope, workflow_fingerprint))
+        should_bootstrap_pointer = False
         if not active and (user_scope, workflow_fingerprint) != self.pointer_key:
             _, active = self.pointer_store.get(self.pointer_key)
-            self.pointer_store.swap((user_scope, workflow_fingerprint), 0, active)
+            should_bootstrap_pointer = True
             version = 1
         manifest = self.resolver.resolve(user_scope, workflow_fingerprint, "triage", active, {item.value for item in self.ui_registry})
         ui_spec = build_uispec_from_manifest(manifest, self.ui_registry)
@@ -163,6 +164,8 @@ class TriageApp:
         )
         result = self.adapter.run(request)
         self._validate_live_adapter_result(result)
+        if should_bootstrap_pointer:
+            self.pointer_store.swap((user_scope, workflow_fingerprint), 0, active)
         run_manifest = RunManifest.from_manifest_set(
             manifest,
             run_id=run_id,

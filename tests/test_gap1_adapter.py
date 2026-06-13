@@ -113,7 +113,7 @@ def test_triage_paths_call_adapter_once_and_manifest_feedback_trace():
 
 def test_pinned_adapter_plan_and_live_unavailable():
     adapter = PinnedHermesAdapter()
-    request = _request(resolved_tool_allowlist=["read", "pytest"], resolved_skill_refs=["skill-a", "skill-b"])
+    request = _request(resolved_tool_allowlist=["read_file", "terminal_process"], resolved_skill_refs=["skill-a", "skill-b"])
     plan = adapter.build_invocation_plan(request)
     assert plan.request_text == request.request_text
     assert plan.prompt_slot_injections["HERMES.md"] == request.resolved_prompt_order
@@ -125,6 +125,29 @@ def test_pinned_adapter_plan_and_live_unavailable():
     assert plan.trajectory_tags["run_id"] == "run-1"
     with pytest.raises(LiveHermesUnavailable):
         adapter.run(request)
+
+
+def test_triage_builder_to_pinned_adapter_preserves_compiled_native_tools():
+    app = TriageApp()
+    app.seed_baseline()
+    _, active = app.pointer_store.get(app.pointer_key)
+    manifest = app.resolver.resolve(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "triage", active, {item.value for item in app.ui_registry})
+    request = app._build_adapter_request(
+        manifest,
+        run_id="run-e2e",
+        session_id="session-e2e",
+        active_module_set_id="active-e2e",
+        candidate_module_id=None,
+        canary_id=None,
+        persistence_mode=PersistencePolicy.ISOLATED,
+        ui_spec_hash=None,
+        request_text="Fix tool boundary",
+    )
+    expected_tools = ToolPolicyCompiler.compile(["read", "search", "pytest"]).hermes_tools
+    plan = PinnedHermesAdapter().build_invocation_plan(request)
+    assert expected_tools
+    assert request.resolved_tool_allowlist == expected_tools
+    assert plan.hermes_tool_allowlist == expected_tools
 
 
 def test_importing_adapter_does_not_import_vendored_hermes(monkeypatch):
