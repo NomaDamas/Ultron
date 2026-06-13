@@ -118,7 +118,7 @@ class RunManifest(BaseModel):
             model_snapshot=dict(model_snapshot),
             resolved_prompt_order=list(manifest.resolved_prompt_order),
             resolved_tool_allowlist=list(manifest.resolved_tool_allowlist),
-            resolved_skill_refs=list(resolved_skill_refs or []),
+            resolved_skill_refs=list(resolved_skill_refs if resolved_skill_refs is not None else manifest.resolved_skill_refs),
             resolved_topology_hash=resolved_topology_hash,
             resolved_ui_spec_hash=resolved_ui_spec_hash,
             safety_policy_hash=safety_policy_hash or _policy_hash(manifest.safety_policy),

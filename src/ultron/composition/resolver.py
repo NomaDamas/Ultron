@@ -57,6 +57,7 @@ class CompositionResolver:
         conflicts.extend(safety_conflicts)
         conflicts.extend(budget_conflicts)
         prompt_order = _resolve_prompts(enabled)
+        skill_refs = _resolve_skill_refs(enabled)
         ui_panels, ui_disabled, ui_conflicts = _resolve_ui_panels(enabled, ui_registry)
         disabled_modules.extend(ui_disabled)
         conflicts.extend(ui_conflicts)
@@ -80,6 +81,7 @@ class CompositionResolver:
             ordered_module_hashes=ordered_hashes,
             resolved_prompt_order=prompt_order,
             resolved_tool_allowlist=resolved_tools,
+            resolved_skill_refs=skill_refs,
             resolved_ui_panels=ui_panels,
             disabled_modules=disabled_modules,
             conflicts=conflicts,
@@ -152,6 +154,17 @@ def _resolve_prompts(enabled: list[RegistryEntry]) -> list[str]:
     ordered: list[str] = []
     for entry in sorted(enabled, key=lambda item: (LAYER_RANK[item.layer], item.module.module_id, item.module.content_hash or "")):
         ordered.extend(entry.module.surfaces.prompt_slots)
+    return ordered
+
+
+def _resolve_skill_refs(enabled: list[RegistryEntry]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for entry in sorted(enabled, key=lambda item: (LAYER_RANK[item.layer], item.module.module_id, item.module.content_hash or "")):
+        for skill_ref in entry.module.surfaces.skill_refs:
+            if skill_ref not in seen:
+                seen.add(skill_ref)
+                ordered.append(skill_ref)
     return ordered
 
 

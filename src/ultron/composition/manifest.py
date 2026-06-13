@@ -26,6 +26,7 @@ class ModuleSetManifest(BaseModel):
     ordered_module_hashes: list[str]
     resolved_prompt_order: list[str]
     resolved_tool_allowlist: list[str]
+    resolved_skill_refs: list[str] = Field(default_factory=list)
     resolved_ui_panels: list[str]
     disabled_modules: list[str]
     conflicts: list[SurfaceConflict]

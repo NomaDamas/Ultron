@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import time
 import uuid
 from typing import Any
 
 from ultron.composition.resolver import CompositionResolver
+from ultron.hermes.adapter import AdapterRunRequest, AdapterRunResult, DeterministicFakeHermesAdapter, HermesAdapter
+from ultron.hermes.tool_policy import ToolPolicyCompiler
 from ultron.evaluation.harness import EvaluationHarness, EvaluationReport, FrozenVersions, GuardrailMetrics, PairedTask
 from ultron.evolution.loop import EvolutionLoop, StabilityControls
 from ultron.evolution.selection import SelectionOutcome, SelectionThresholds, Selector
@@ -36,7 +39,7 @@ class PolicyDenied(PermissionError):
 
 
 class TriageApp:
-    def __init__(self) -> None:
+    def __init__(self, adapter: HermesAdapter | None = None) -> None:
         self.ui_registry: set[ComponentType] = set(ComponentType)
         self.adapter_contract = load_default_contract()
         self.registry = ModuleRegistry()
@@ -55,14 +58,15 @@ class TriageApp:
             StabilityControls(active_module_cap=2, diversity_floor=0, promotion_cooldown_s=0, prune_cooldown_s=0),
         )
         self.feedback_channel = FeedbackChannel()
+        self.adapter = adapter or DeterministicFakeHermesAdapter()
         self.evaluation_harness = EvaluationHarness(self.selector, self.thresholds)
         self.frozen_versions = FrozenVersions(
             hermes_version="pinned-hermes-ref",
             adapter_version="ultron-adapter-mvp",
             contract_version=self.adapter_contract.hermes_commit,
-            model_provider="stub",
-            model_name="deterministic-triage",
-            model_snapshot="g007",
+            model_provider=self.adapter.provider_id,
+            model_name="adapter-mediated",
+            model_snapshot="adapter",
             decoding={"temperature": 0},
             ui_registry_version="g007-ui-registry",
             baseline_module_set_hash="unseeded",
@@ -143,27 +147,43 @@ class TriageApp:
             version = 1
         manifest = self.resolver.resolve(user_scope, workflow_fingerprint, "triage", active, {item.value for item in self.ui_registry})
         ui_spec = build_uispec_from_manifest(manifest, self.ui_registry)
+        run_id = uuid.uuid4().hex
+        session_id = uuid.uuid4().hex
+        active_module_set_id = f"{user_scope}:{workflow_fingerprint}:v{version}"
+        request = self._build_adapter_request(
+            manifest,
+            run_id=run_id,
+            session_id=session_id,
+            active_module_set_id=active_module_set_id,
+            candidate_module_id=None,
+            canary_id=None,
+            persistence_mode=PersistencePolicy.ISOLATED,
+            ui_spec_hash=ui_spec.spec_hash,
+            request_text=request_text,
+        )
+        result = self.adapter.run(request)
+        self._validate_live_adapter_result(result)
         run_manifest = RunManifest.from_manifest_set(
             manifest,
-            run_id=uuid.uuid4().hex,
-            session_id=uuid.uuid4().hex,
-            active_module_set_id=f"{user_scope}:{workflow_fingerprint}:v{version}",
+            run_id=run_id,
+            session_id=session_id,
+            active_module_set_id=active_module_set_id,
             hermes_version=self.frozen_versions.hermes_version,
             adapter_version=self.frozen_versions.adapter_version,
             contract_version=self.frozen_versions.contract_version,
-            model_snapshot={"provider": "stub", "name": "deterministic-triage"},
+            model_snapshot=self._validated_model_snapshot(result),
             side_effect_ledger_id="in-memory-ledger",
             created_at=time.time(),
             timestamp_source="server",
             persistence_mode=PersistencePolicy.ISOLATED,
             resolved_ui_spec_hash=ui_spec.spec_hash,
         ).sign()
-        result = self._simulate_adapter_run(request_text, manifest, run_manifest)
+        result_payload = result.model_dump(mode="json")
         for module_hash in manifest.ordered_module_hashes:
-            self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", module_hash, None, SideEffectKind.ADAPTER_STATE, result)
+            self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", module_hash, None, SideEffectKind.ADAPTER_STATE, result_payload)
         self.last_manifest = run_manifest
         self.last_ui_spec = ui_spec
-        return {"run_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec}
+        return {"run_result": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec}
 
     def submit_feedback(self, run_id: str, rating: int = 1, comment: str = "") -> FeedbackEvent:
         event = FeedbackEvent(
@@ -179,7 +199,7 @@ class TriageApp:
             candidate_id=self.last_candidate_hash,
             primitive_id=None,
             run_id=run_id,
-            hermes_trace_id=None,
+            hermes_trace_id=self.last_manifest.model_snapshot.get("trajectory_id") if self.last_manifest else None,
             ui_component_id=ComponentType.FEEDBACK_PANEL.value,
             timestamp=time.time(),
             timestamp_source=TimestampSource.SERVER,
@@ -199,13 +219,34 @@ class TriageApp:
         version, active = self.pointer_store.get(self.pointer_key)
         parent_hash = active[-1]
         proposal = self.variation_engine.propose(parent_hash, VariationPrimitive(primitive), change)
-        candidate = self.variation_engine.apply(proposal)
+        staging_registry = copy.deepcopy(self.registry)
+        staging_engine = VariationEngine(staging_registry, self.adapter_contract)
+        candidate = staging_engine.apply(proposal)
         candidate_hash = candidate.content_hash or ""
-        self.evolution_loop.register_candidate(candidate_hash)
         canary_id = f"canary-{candidate_hash[:12]}"
+        candidate_active = list(active) + [candidate_hash]
+        manifest = CompositionResolver(staging_registry, self.adapter_contract).resolve(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "triage", candidate_active, {item.value for item in self.ui_registry})
+        ui_spec = build_uispec_from_manifest(manifest, self.ui_registry)
+        run_id = uuid.uuid4().hex
+        session_id = uuid.uuid4().hex
+        active_module_set_id = f"{DEFAULT_SCOPE}:{DEFAULT_WORKFLOW}:canary"
+        request = self._build_adapter_request(
+            manifest,
+            run_id=run_id,
+            session_id=session_id,
+            active_module_set_id=active_module_set_id,
+            candidate_module_id=candidate_hash,
+            canary_id=canary_id,
+            persistence_mode=PersistencePolicy.ISOLATED,
+            ui_spec_hash=ui_spec.spec_hash,
+            request_text=request_text,
+        )
+        result = self.adapter.run(request)
+        self._validate_live_adapter_result(result)
+        self.registry.register(candidate, ModuleLifecycle.CANDIDATE, "canary", human_approved_additive=proposal.human_approved)
+        self.evolution_loop.register_candidate(candidate_hash)
         self.canary_store.write(canary_id, "adapter_state", "candidate_hash", candidate_hash)
         self.canary_store.write(canary_id, "memory", "request", request_text)
-        candidate_active = list(active) + [candidate_hash]
         self.rollback_controller.track_pointer_candidate(
             canary_id,
             self.pointer_key,
@@ -215,17 +256,15 @@ class TriageApp:
             run_id="canary-pointer",
             module_set_hash=candidate_hash,
         )
-        manifest = self.resolver.resolve(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "triage", candidate_active, {item.value for item in self.ui_registry})
-        ui_spec = build_uispec_from_manifest(manifest, self.ui_registry)
         run_manifest = RunManifest.from_manifest_set(
             manifest,
-            run_id=uuid.uuid4().hex,
-            session_id=uuid.uuid4().hex,
-            active_module_set_id=f"{DEFAULT_SCOPE}:{DEFAULT_WORKFLOW}:canary",
+            run_id=run_id,
+            session_id=session_id,
+            active_module_set_id=active_module_set_id,
             hermes_version=self.frozen_versions.hermes_version,
             adapter_version=self.frozen_versions.adapter_version,
             contract_version=self.frozen_versions.contract_version,
-            model_snapshot={"provider": "stub", "name": "deterministic-triage"},
+            model_snapshot=self._validated_model_snapshot(result),
             side_effect_ledger_id="in-memory-ledger",
             created_at=time.time(),
             timestamp_source="server",
@@ -235,11 +274,11 @@ class TriageApp:
             canary_id=canary_id,
             resolved_ui_spec_hash=ui_spec.spec_hash,
         ).sign()
-        result = self._simulate_adapter_run(request_text, manifest, run_manifest)
-        self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", candidate_hash, canary_id, SideEffectKind.ADAPTER_STATE, result)
+        result_payload = result.model_dump(mode="json")
+        self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", candidate_hash, canary_id, SideEffectKind.ADAPTER_STATE, result_payload)
         self.last_candidate_hash = candidate_hash
         self.last_canary_id = canary_id
-        return {"candidate": candidate, "proposal": proposal, "canary_id": canary_id, "candidate_run": result, "run_manifest": run_manifest, "ui_spec": ui_spec, "mutation_diff": change}
+        return {"candidate": candidate, "proposal": proposal, "canary_id": canary_id, "candidate_run": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec, "mutation_diff": change}
 
     def evaluate_and_decide(self, candidate_hash: str, paired_tasks: list[PairedTask], canary_id: str | None = None) -> dict[str, Any]:
         canary_id = canary_id or self.last_canary_id or f"canary-{candidate_hash[:12]}"
@@ -312,16 +351,68 @@ class TriageApp:
         restored = self.evolution_loop.restore(target, DEFAULT_SCOPE, DEFAULT_WORKFLOW, restore_version)
         return {"module_hash": target, "pruned": pruned, "restored": restored}
 
-    def _simulate_adapter_run(self, request_text: str, manifest: Any, run_manifest: RunManifest) -> dict[str, Any]:
-        request = request_text.strip() or "triage request"
-        return {
-            "plan": [f"Clarify scope for: {request[:80]}", "Apply focused change", "Run targeted tests"],
-            "risks": ["stale pointer", "permission expansion", "rollback poisoning"],
-            "tests": ["pytest tests/ -q", "server create_app boot"],
-            "manifest_hash": manifest.manifest_hash,
-            "run_id": run_manifest.run_id,
-            "module_hashes": list(manifest.ordered_module_hashes),
-        }
+    def _build_adapter_request(
+        self,
+        manifest: Any,
+        *,
+        run_id: str,
+        session_id: str,
+        active_module_set_id: str,
+        candidate_module_id: str | None,
+        canary_id: str | None,
+        persistence_mode: PersistencePolicy,
+        ui_spec_hash: str | None,
+        request_text: str,
+    ) -> AdapterRunRequest:
+        compiled_tools = ToolPolicyCompiler.compile(manifest.resolved_tool_allowlist)
+        return AdapterRunRequest(
+            run_id=run_id,
+            session_id=session_id,
+            user_scope=manifest.user_scope,
+            workflow_fingerprint=manifest.workflow_fingerprint,
+            active_module_set_id=active_module_set_id,
+            active_module_set_hash=manifest.manifest_hash or manifest.compute_manifest_hash(),
+            ordered_module_hashes=list(manifest.ordered_module_hashes),
+            candidate_module_id=candidate_module_id,
+            canary_id=canary_id,
+            persistence_mode=persistence_mode,
+            isolated_root=f"/tmp/ultron/{session_id}" if persistence_mode is PersistencePolicy.ISOLATED else None,
+            resolved_prompt_order=list(manifest.resolved_prompt_order),
+            resolved_tool_allowlist=list(compiled_tools.hermes_tools),
+            resolved_skill_refs=list(manifest.resolved_skill_refs),
+            budget_policy=dict(manifest.budget_policy),
+            safety_policy=dict(manifest.safety_policy),
+            ui_spec_hash=ui_spec_hash,
+            request_text=request_text,
+        )
+
+    def _validated_model_snapshot(self, result: AdapterRunResult) -> dict[str, Any]:
+        self._validate_live_adapter_result(result)
+        snapshot = dict(result.model_snapshot)
+        snapshot["provider"] = result.model_provider
+        snapshot["name"] = result.model_name
+        snapshot["trajectory_id"] = result.trajectory_id
+        return snapshot
+
+    def _validate_live_adapter_result(self, result: AdapterRunResult) -> None:
+        if not self.adapter.is_live:
+            return
+        denylist = {"stub", "fake", "fake-deterministic"}
+        snapshot = result.model_snapshot
+        snapshot_provider = str(snapshot.get("provider", "")).lower()
+        result_provider = result.model_provider.lower()
+        if snapshot_provider in denylist or result_provider in denylist:
+            raise ValueError("live Hermes adapter returned denied stub/fake provider")
+        snapshot_name = str(snapshot.get("name", "")).lower()
+        result_name = result.model_name.lower()
+        if "stub" in snapshot_name or "fake" in snapshot_name:
+            raise ValueError("live Hermes adapter returned denied stub/fake snapshot name")
+        if "stub" in result_name or "fake" in result_name:
+            raise ValueError("live Hermes adapter returned denied stub/fake model name")
+        if snapshot.get("stub") or snapshot.get("is_stub") or snapshot.get("fake"):
+            raise ValueError("live Hermes adapter returned stub/fake snapshot marker")
+        if result.model_provider != self.adapter.provider_id:
+            raise ValueError("live Hermes adapter provider mismatch")
 
     def _append_ledger(self, run_id: str, module_set_hash: str, module_hash: str | None, canary_id: str | None, kind: SideEffectKind, payload: dict[str, Any]) -> None:
         self.ledger.append(LedgerEntry(run_id=run_id, module_set_hash=module_set_hash, module_hash=module_hash, canary_id=canary_id, kind=kind, payload=payload))
