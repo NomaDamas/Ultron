@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import time
 import uuid
 from typing import Any
@@ -16,6 +18,7 @@ from ultron.evolution.loop import EvolutionLoop, StabilityControls
 from ultron.evolution.selection import SelectionOutcome, SelectionThresholds, Selector
 from ultron.evolution.variation import VariationEngine, VariationPrimitive
 from ultron.feedback.channel import ConsentClass, FeedbackChannel, FeedbackEvent, FeedbackEventType, SourceReliability, TimestampSource
+from ultron.feedback.aggregation import FeedbackAggregator, FeedbackSummary, canonical_rating_payload
 from ultron.module.contract import load_default_contract
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
 from ultron.ledger.canary_store import CanaryScopedStore, RollbackController
@@ -67,6 +70,7 @@ class TriageApp:
             StabilityControls(active_module_cap=2, diversity_floor=0, promotion_cooldown_s=0, prune_cooldown_s=0),
         )
         self.feedback_channel = FeedbackChannel()
+        self.feedback_aggregator = FeedbackAggregator(self.feedback_channel)
         self.adapter = adapter or DeterministicFakeHermesAdapter()
         self.evaluation_harness = EvaluationHarness(self.selector, self.thresholds)
         self.frozen_versions = FrozenVersions(
@@ -186,6 +190,7 @@ class TriageApp:
             self.pointer_store.swap((user_scope, workflow_fingerprint), 0, active)
         if self.manifest_signer is None:
             raise ValueError("run manifest signing requires an explicit signer")
+        run_created_at = time.time()
         run_manifest = RunManifest.from_manifest_set(
             manifest,
             run_id=run_id,
@@ -196,7 +201,7 @@ class TriageApp:
             contract_version=self.frozen_versions.contract_version,
             model_snapshot=self._validated_model_snapshot(result),
             side_effect_ledger_id="in-memory-ledger",
-            created_at=time.time(),
+            created_at=run_created_at,
             timestamp_source="server",
             persistence_mode=PersistencePolicy.ISOLATED,
             resolved_ui_spec_hash=ui_spec.spec_hash,
@@ -204,11 +209,15 @@ class TriageApp:
         result_payload = result.model_dump(mode="json")
         for module_hash in manifest.ordered_module_hashes:
             self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", module_hash, None, SideEffectKind.ADAPTER_STATE, result_payload)
+        self._update_fitness_for_modules(manifest.ordered_module_hashes, run_manifest.created_at)
         self.last_manifest = run_manifest
         self.last_ui_spec = ui_spec
         return {"run_result": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec}
 
     def submit_feedback(self, run_id: str, rating: int = 1, comment: str = "") -> FeedbackEvent:
+        payload = canonical_rating_payload(rating, comment)
+        payload_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        consent_class = ConsentClass.PRODUCT_IMPROVEMENT
         event = FeedbackEvent(
             event_id=uuid.uuid4().hex,
             event_type=FeedbackEventType.RATING,
@@ -226,15 +235,17 @@ class TriageApp:
             ui_component_id=ComponentType.FEEDBACK_PANEL.value,
             timestamp=time.time(),
             timestamp_source=TimestampSource.SERVER,
-            consent_class=ConsentClass.OPERATIONAL,
+            consent_class=consent_class,
             source_reliability=SourceReliability.EXPLICIT_USER,
-            redaction_status="none",
-            retention_rule="ephemeral",
-            payload_hash=str(hash((rating, comment))),
-            payload_schema="rating:v1",
+            redaction_status="redacted",
+            retention_rule="30d",
+            payload_hash=payload_hash,
+            payload_schema=f"rating:v1:{payload['rating']}",
         )
         stored = self.feedback_channel.ingest(event)
         self._append_ledger(run_id, self.last_manifest.active_module_set_hash if self.last_manifest else "feedback", None, None, SideEffectKind.FEEDBACK_EVENT, stored.model_dump(mode="json"))
+        if stored.candidate_id:
+            self._update_fitness_for_modules([stored.candidate_id], stored.timestamp, feedback_summary=self.feedback_summary(stored.candidate_id))
         return stored
 
     def propose_and_canary(self, primitive: VariationPrimitive | str, change: dict[str, Any], request_text: str = "candidate triage") -> dict[str, Any]:
@@ -333,6 +344,7 @@ class TriageApp:
             after.model_dump(),
         )
         self.evaluated_candidates[candidate_hash] = {"report": report, "outcome": outcome, "canary_id": canary_id}
+        self._update_fitness_for_modules([candidate_hash], time.time(), benchmark_report=report, feedback_summary=self.feedback_summary(candidate_hash))
         if not report.promotable:
             self.evolution_loop.mark_rollback(candidate_hash)
             self.registry.set_lifecycle(candidate_hash, ModuleLifecycle.DECAYING)
@@ -373,6 +385,7 @@ class TriageApp:
         )
         decision["report"] = report
         self.evaluated_candidates[candidate_hash] = {"report": report, "outcome": decision["outcome"], "canary_id": decision["canary_id"]}
+        self._update_fitness_for_modules([candidate_hash], time.time(), benchmark_report=report, feedback_summary=self.feedback_summary(candidate_hash))
         return decision
 
     def _benchmark_request(self, module_hashes: list[str], task: Any, side: str) -> AdapterRunRequest:
@@ -450,6 +463,81 @@ class TriageApp:
         request = {"request_id": uuid.uuid4().hex, "status": "pending_human_approval", "payload": dict(payload)}
         self.pending_permission_expansions.append(request)
         return request
+
+    def feedback_summary(self, candidate_hash: str) -> FeedbackSummary:
+        return self.feedback_aggregator.summarize(candidate_hash)
+
+    def run_atrophy_scan(self, now: float) -> dict[str, Any]:
+        self.seed_baseline()
+        version, active = self.pointer_store.get(self.pointer_key)
+        eligible = self.evolution_loop.atrophy_scan(active, now)
+        pruned: list[str] = []
+        for module_hash in eligible:
+            current_version, current_active = self.pointer_store.get(self.pointer_key)
+            if module_hash not in current_active:
+                continue
+            new_active = [hash_value for hash_value in current_active if hash_value != module_hash]
+            if len(new_active) < self.evolution_loop.controls.diversity_floor:
+                continue
+            if isinstance(self.pointer_store, SqliteActivePointerStore) and isinstance(self.registry, SqliteModuleRegistry) and isinstance(self.ledger, SqliteSideEffectLedger):
+                from ultron.persistence.unit_of_work import PromotionUnitOfWork
+                PromotionUnitOfWork(self.pointer_store.db, self.registry, self.pointer_store, self.ledger).prune(module_hash, current_version, new_active, f"atrophy-{int(now)}", "triage-app", key=self.pointer_key)
+                pruned.append(module_hash)
+            elif self.evolution_loop.prune(module_hash):
+                self._append_ledger(f"atrophy-{int(now)}", module_hash, module_hash, None, SideEffectKind.POINTER_TRANSITION, {"action": "atrophy_prune", "prior_version": current_version, "prior_hashes": current_active, "new_hashes": new_active})
+                pruned.append(module_hash)
+        final_version, final_active = self.pointer_store.get(self.pointer_key)
+        return {"eligible": eligible, "pruned": pruned, "prior_version": version, "new_version": final_version, "active": final_active}
+
+    def _update_fitness_for_modules(
+        self,
+        module_hashes: list[str],
+        timestamp: float,
+        *,
+        benchmark_report: EvaluationReport | None = None,
+        feedback_summary: FeedbackSummary | None = None,
+    ) -> None:
+        for module_hash in module_hashes:
+            entry = self.registry.get(module_hash)
+            fitness = entry.module.fitness
+            labels = list(fitness.evidence_labels)
+            if benchmark_report is not None and benchmark_report.evidence_label not in labels:
+                labels.append(benchmark_report.evidence_label)
+            if feedback_summary is not None and feedback_summary.evidence_label is EvidenceLabel.PREFERENCE and EvidenceLabel.PREFERENCE not in labels:
+                labels.append(EvidenceLabel.PREFERENCE)
+            primary_metric = fitness.primary_metric
+            if benchmark_report is not None:
+                primary_metric = benchmark_report.mean_primary_delta
+            elif feedback_summary is not None and feedback_summary.mean_rating is not None:
+                primary_metric = feedback_summary.mean_rating
+            decay_score = _deterministic_decay_score(primary_metric, feedback_summary)
+            updated_module = entry.module.model_copy(
+                update={
+                    "fitness": fitness.model_copy(
+                        update={
+                            "usage_count": fitness.usage_count + 1,
+                            "last_used_at": timestamp,
+                            "primary_metric": primary_metric,
+                            "decay_score": decay_score,
+                            "evidence_labels": labels,
+                        }
+                    )
+                },
+                deep=True,
+            )
+            self._store_fitness_update(module_hash, updated_module)
+
+    def _store_fitness_update(self, module_hash: str, updated_module: HarnessModule) -> None:
+        if isinstance(self.registry, SqliteModuleRegistry):
+            with self.registry.db.tx() as cur:
+                cur.execute("UPDATE modules SET module_json = ? WHERE content_hash = ?", (updated_module.model_dump_json(), module_hash))
+                if cur.rowcount != 1:
+                    raise KeyError(module_hash)
+        else:
+            existing = self.registry._entries[module_hash]
+            updated = existing.model_copy(update={"module": updated_module}, deep=True)
+            self.registry._entries[module_hash] = updated
+            self.registry._registration_returns[module_hash] = updated.model_copy(deep=True)
 
     def atrophy_and_restore(self, module_hash: str | None = None) -> dict[str, Any]:
         self.seed_baseline()
@@ -544,6 +632,16 @@ class TriageApp:
     def _append_ledger(self, run_id: str, module_set_hash: str, module_hash: str | None, canary_id: str | None, kind: SideEffectKind, payload: dict[str, Any]) -> None:
         self.ledger.append(LedgerEntry(run_id=run_id, module_set_hash=module_set_hash, module_hash=module_hash, canary_id=canary_id, kind=kind, payload=payload))
 
+
+def _deterministic_decay_score(primary_metric: float | None, feedback_summary: FeedbackSummary | None = None) -> float:
+    feedback_penalty = 0.0
+    if feedback_summary is not None and feedback_summary.mean_rating is not None and feedback_summary.mean_rating < 0:
+        feedback_penalty = min(1.0, abs(feedback_summary.mean_rating))
+    metric_penalty = 0.0
+    if primary_metric is not None and primary_metric < 0:
+        metric_penalty = min(1.0, abs(primary_metric))
+    return max(metric_penalty, feedback_penalty)
+
 def build_durable_triage_app(db_path: str, *, signer: ManifestSigner | None = None, key_id: str = "prod") -> TriageApp:
     """Build a TriageApp backed by SQLite stores with explicit production signing."""
     return _build_durable_triage_app(db_path, signer=signer or ManifestSigner.from_provider(key_id, EnvKeyProvider()))
@@ -578,6 +676,7 @@ def _build_durable_triage_app(db_path: str, *, signer: ManifestSigner) -> Triage
         StabilityControls(active_module_cap=2, diversity_floor=0, promotion_cooldown_s=0, prune_cooldown_s=0),
     )
     app.feedback_channel = SqliteFeedbackChannel(db)
+    app.feedback_aggregator = FeedbackAggregator(app.feedback_channel)
     app.evaluated_candidates = SqliteEvaluatedCandidateStore(db)
     app.manifest_signer = signer
     return app
