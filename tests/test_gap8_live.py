@@ -183,6 +183,40 @@ def test_safety_and_budget_expansion_requires_human_approval_in_synthesis_and_re
             LiveModelModuleSynthesizer(FakeModelProvider(expanded.model_dump(mode="json"))).synthesize(context)
 
 
+def test_surfaces_persistence_mode_loosening_blocks_auto_promotion_and_synthesis():
+    app = TriageApp()
+    parent = app.seed_baseline()
+    constraints = SynthesisPolicyConstraints(allowed_surfaces=parent.surfaces)
+    context = SynthesisContext(request_text="synth", workflow_fingerprint=DEFAULT_WORKFLOW, parent_module=parent, policy_constraints=constraints)
+    registry = ModuleRegistry()
+    registry.register(parent, ModuleLifecycle.SEED, "tenant")
+
+    surfaces = parent.surfaces.model_copy(update={"persistence": {**(parent.surfaces.persistence or {}), "mode": PersistencePolicy.NORMAL.value}})
+    expanded = parent.model_copy(deep=True, update={"version": parent.version + 1, "parent_id": parent.content_hash, "surfaces": surfaces, "content_hash": None}).finalized()
+
+    registry.register(expanded, ModuleLifecycle.CANDIDATE, "tenant")
+    assert registry.can_auto_promote(expanded.content_hash) is False
+    with pytest.raises(PermissionError, match="permission expansion"):
+        LiveModelModuleSynthesizer(FakeModelProvider(expanded.model_dump(mode="json"))).synthesize(context)
+
+
+def test_surfaces_persistence_mode_equal_or_tighter_does_not_block_auto_promotion_or_synthesis():
+    app = TriageApp()
+    parent = app.seed_baseline()
+    constraints = SynthesisPolicyConstraints(allowed_surfaces=parent.surfaces)
+    context = SynthesisContext(request_text="synth", workflow_fingerprint=DEFAULT_WORKFLOW, parent_module=parent, policy_constraints=constraints)
+
+    for mode in (PersistencePolicy.ISOLATED, PersistencePolicy.READ_ONLY):
+        registry = ModuleRegistry()
+        registry.register(parent, ModuleLifecycle.SEED, "tenant")
+        surfaces = parent.surfaces.model_copy(update={"persistence": {**(parent.surfaces.persistence or {}), "mode": mode.value}})
+        candidate = parent.model_copy(deep=True, update={"version": parent.version + 1, "parent_id": parent.content_hash, "surfaces": surfaces, "content_hash": None}).finalized()
+
+        registry.register(candidate, ModuleLifecycle.CANDIDATE, "tenant")
+        assert registry.can_auto_promote(candidate.content_hash) is True
+        assert LiveModelModuleSynthesizer(FakeModelProvider(candidate.model_dump(mode="json"))).synthesize(context).content_hash == candidate.content_hash
+
+
 def test_http_provider_missing_env_fails_closed(monkeypatch):
     for key in ["ULTRON_MODEL_BASE_URL", "ULTRON_MODEL_API_KEY", "ULTRON_MODEL_NAME"]:
         monkeypatch.delenv(key, raising=False)

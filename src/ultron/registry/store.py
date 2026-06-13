@@ -179,10 +179,11 @@ def expands_module_permissions(candidate: HarnessModule, parent: HarnessModule) 
         return True
     if not _list_subset(candidate.required_adapter_capabilities, parent.required_adapter_capabilities):
         return True
-    if _persistence_rank(candidate.persistence_policy) > _persistence_rank(parent.persistence_policy):
+    if _persistence_mode_widens(candidate, parent):
         return True
-    if _dict_widens(candidate.surfaces.persistence, parent.surfaces.persistence):
+    if _dict_widens(candidate.surfaces.persistence, parent.surfaces.persistence, ignore={"mode"}):
         return True
+
     if _safety_widens(candidate.surfaces.safety, parent.surfaces.safety):
         return True
     return _budget_widens(candidate.surfaces.budget, parent.surfaces.budget)
@@ -253,6 +254,28 @@ def _persistence_rank(policy: PersistencePolicy) -> int:
         PersistencePolicy.CHECKPOINTED: 2,
         PersistencePolicy.NORMAL: 3,
     }[policy]
+
+
+def _persistence_mode_widens(candidate: HarnessModule, parent: HarnessModule) -> bool:
+    if _persistence_rank(candidate.persistence_policy) > _persistence_rank(parent.persistence_policy):
+        return True
+    candidate_surface_mode = _surface_persistence_policy(candidate.surfaces.persistence)
+    parent_surface_mode = _surface_persistence_policy(parent.surfaces.persistence)
+    if candidate_surface_mode is None:
+        return False
+    parent_mode = parent_surface_mode or parent.persistence_policy
+    return _persistence_rank(candidate_surface_mode) > _persistence_rank(parent_mode)
+
+
+def _surface_persistence_policy(surface: dict[str, object] | None) -> PersistencePolicy | None:
+    mode = (surface or {}).get("mode")
+    if mode is None:
+        return None
+    if isinstance(mode, PersistencePolicy):
+        return mode
+    if isinstance(mode, str):
+        return PersistencePolicy(mode.upper())
+    return PersistencePolicy(mode)
 
 
 def _is_sha256_hex(value: str) -> bool:
