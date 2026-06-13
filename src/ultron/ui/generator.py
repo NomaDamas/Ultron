@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -46,7 +47,14 @@ class DeterministicFakeUiSpecGenerator:
         return validate_generated_uispec(spec, context.allowed_registry)
 
 
+class ModelProvider(Protocol):
+    def complete(self, prompt: str, schema_hint: str | None) -> str: ...
+
+
 class LiveModelUiSpecGenerator:
+    def __init__(self, provider: ModelProvider | None = None) -> None:
+        self.provider = provider
+
     @property
     def is_live(self) -> bool:
         return True
@@ -65,8 +73,15 @@ class LiveModelUiSpecGenerator:
         }
 
     def generate(self, context: UiGenContext) -> UiSpec:
-        self.build_prompt(context)
-        raise LiveModelUnavailable("live model UI generation requires a configured model")
+        if self.provider is None:
+            raise LiveModelUnavailable("live model UI generation requires a configured model")
+        prompt = json.dumps(self.build_prompt(context), sort_keys=True)
+        text = self.provider.complete(prompt, "UiSpec JSON with components[{type,region,priority,props,telemetry_schema}] and optional spec_hash")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("live model UI generation returned invalid JSON") from exc
+        return validate_generated_uispec(payload, context.allowed_registry)
 
 
 def validate_generated_uispec(spec: UiSpec | dict[str, Any], registry: Iterable[ComponentType | str]) -> UiSpec:

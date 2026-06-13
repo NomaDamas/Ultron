@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import hashlib
 import json
 import time
@@ -11,7 +12,8 @@ from typing import Any
 
 from ultron.auth.principal import DEFAULT_LOCAL_PRINCIPAL, Principal
 from ultron.composition.resolver import CompositionResolver
-from ultron.hermes.adapter import AdapterRunRequest, AdapterRunResult, DeterministicFakeHermesAdapter, HermesAdapter
+from ultron.hermes.adapter import AdapterRunRequest, AdapterRunResult, DeterministicFakeHermesAdapter, HermesAdapter, PinnedHermesAdapter
+from ultron.hermes.runner import SubprocessHermesRunner
 from ultron.hermes.tool_policy import ToolPolicyCompiler
 from ultron.evaluation.benchmark import BenchmarkFixture, BenchmarkRunner, DEFAULT_CODE_TRIAGE_V0
 from ultron.evaluation.harness import EvaluationHarness, EvaluationReport, FrozenVersions, GuardrailMetrics, PairedTask
@@ -22,7 +24,8 @@ from ultron.feedback.channel import ConsentClass, FeedbackChannel, FeedbackEvent
 from ultron.feedback.aggregation import FeedbackAggregator, FeedbackSummary, canonical_rating_payload
 from ultron.module.contract import load_default_contract
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
-from ultron.synthesis.module_synthesizer import DeterministicFakeModuleSynthesizer, SynthesisContext, SynthesisPolicyConstraints, validate_synthesized_module
+from ultron.synthesis.module_synthesizer import DeterministicFakeModuleSynthesizer, LiveModelModuleSynthesizer, ModuleSynthesizer, SynthesisContext, SynthesisPolicyConstraints, validate_synthesized_module
+from ultron.model_provider import HttpModelProvider
 from ultron.ledger.canary_store import CanaryScopedStore, RollbackController
 from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind, SideEffectLedger
 from ultron.obs.telemetry import TelemetrySink
@@ -35,7 +38,7 @@ from ultron.run.manifest import RunManifest
 from ultron.persistence.db import Database
 from ultron.persistence.sqlite_stores import SqliteActivePointerStore, SqliteBlobStore, SqliteEvaluatedCandidateStore, SqliteFeedbackChannel, SqliteModuleRegistry, SqliteSideEffectLedger
 from ultron.run.signer import EnvKeyProvider, FixtureKeyProvider, ManifestSigner
-from ultron.ui.generator import DeterministicFakeUiSpecGenerator, UiGenContext, validate_generated_uispec
+from ultron.ui.generator import DeterministicFakeUiSpecGenerator, LiveModelUiSpecGenerator, UiGenContext, UiSpecGenerator, validate_generated_uispec
 from ultron.ui.runtime import ComponentType, UiSpec
 
 
@@ -52,7 +55,7 @@ class PolicyDenied(PermissionError):
 
 
 class TriageApp:
-    def __init__(self, adapter: HermesAdapter | None = None) -> None:
+    def __init__(self, adapter: HermesAdapter | None = None, ui_generator: UiSpecGenerator | None = None, module_synthesizer: ModuleSynthesizer | None = None) -> None:
         self.ui_registry: set[ComponentType] = set(ComponentType)
         self.adapter_contract = load_default_contract()
         self.blob_store = BlobStore()
@@ -65,8 +68,8 @@ class TriageApp:
         self.canary_store = CanaryScopedStore()
         self.rollback_controller = RollbackController(self.registry, self.ledger, self.canary_store, self.pointer_store)
         self.variation_engine = VariationEngine(self.registry, self.adapter_contract, self.blob_store)
-        self.ui_generator = DeterministicFakeUiSpecGenerator()
-        self.module_synthesizer = DeterministicFakeModuleSynthesizer(self.blob_store, self.adapter_contract)
+        self.ui_generator = ui_generator or DeterministicFakeUiSpecGenerator()
+        self.module_synthesizer = module_synthesizer or DeterministicFakeModuleSynthesizer(self.blob_store, self.adapter_contract)
         self.thresholds = SelectionThresholds(min_paired_tasks=10, min_primary_improvement=0.10)
         self.selector = Selector(self.thresholds)
         self.evolution_loop = EvolutionLoop(
@@ -731,6 +734,34 @@ def _deterministic_decay_score(primary_metric: float | None, feedback_summary: F
     if primary_metric is not None and primary_metric < 0:
         metric_penalty = min(1.0, abs(primary_metric))
     return max(metric_penalty, feedback_penalty)
+
+
+def build_triage_app_from_env() -> TriageApp:
+    adapter_name = os.getenv("ULTRON_ADAPTER", "fake")
+    ui_name = os.getenv("ULTRON_UI_GENERATOR", "fake")
+    synth_name = os.getenv("ULTRON_MODULE_SYNTH", "fake")
+    adapter: HermesAdapter
+    if adapter_name == "fake":
+        adapter = DeterministicFakeHermesAdapter()
+    elif adapter_name == "pinned-hermes":
+        adapter = PinnedHermesAdapter(SubprocessHermesRunner())
+    else:
+        raise ValueError(f"unknown ULTRON_ADAPTER: {adapter_name}")
+    provider = HttpModelProvider() if ui_name == "model" or synth_name == "model" else None
+    if ui_name == "fake":
+        ui_generator: UiSpecGenerator = DeterministicFakeUiSpecGenerator()
+    elif ui_name == "model":
+        ui_generator = LiveModelUiSpecGenerator(provider)
+    else:
+        raise ValueError(f"unknown ULTRON_UI_GENERATOR: {ui_name}")
+    app = TriageApp(adapter=adapter, ui_generator=ui_generator)
+    if synth_name == "fake":
+        app.module_synthesizer = DeterministicFakeModuleSynthesizer(app.blob_store, app.adapter_contract)
+    elif synth_name == "model":
+        app.module_synthesizer = LiveModelModuleSynthesizer(provider)
+    else:
+        raise ValueError(f"unknown ULTRON_MODULE_SYNTH: {synth_name}")
+    return app
 
 def build_durable_triage_app(db_path: str, *, signer: ManifestSigner | None = None, key_id: str = "prod") -> TriageApp:
     """Build a TriageApp backed by SQLite stores with explicit production signing."""

@@ -14,10 +14,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, PolicyDenied, TriageApp
+from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, PolicyDenied, build_triage_app_from_env
 from ultron.auth.principal import DEFAULT_LOCAL_PRINCIPAL, Scope, SessionStore
 from ultron.evolution.variation import VariationPrimitive
 from ultron.ui.runtime import ActionCommand, ActionType, validate_action
+from ultron.hermes.adapter import LiveHermesUnavailable
+from ultron.ui.generator import LiveModelUnavailable
 
 CSP = "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 STATIC_DIR = Path(__file__).with_name("static")
@@ -32,7 +34,7 @@ ACTION_SCOPES = {
 
 
 def create_app() -> FastAPI:
-    engine = TriageApp()
+    engine = build_triage_app_from_env()
     engine.seed_baseline()
     csrf_tokens: dict[str, str] = {}
     session_store = SessionStore(secure_cookies=os.getenv("ULTRON_SECURE_COOKIES", "0") == "1")
@@ -104,11 +106,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (ValidationError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         if cmd.type is ActionType.SUBMIT_REQUEST:
             request_text = str(cmd.payload.get("request_text", ""))
-            result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text, actor=principal.subject if principal else None)
-            canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text)
+            try:
+                result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text, actor=principal.subject if principal else None)
+                canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text)
+            except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
             candidate_hash = canary["candidate"].content_hash or ""
             return _jsonable({"ok": True, "result": result, "candidate": canary["candidate"], "canary_id": canary["canary_id"]})
         if cmd.type is ActionType.RUN_BENCHMARK:
@@ -117,6 +124,8 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=403, detail="candidate benchmark requires a candidate")
             try:
                 evaluation = engine.benchmark_and_decide(candidate_hash, canary_id=str(cmd.payload.get("canary_id") or engine.last_canary_id or ""), actor=principal.subject if principal else None)
+            except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
             except (KeyError, PermissionError, ValueError) as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             return _jsonable({"ok": True, "evaluation": evaluation})

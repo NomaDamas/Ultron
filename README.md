@@ -51,6 +51,23 @@ pip install pyyaml 'pydantic>=2' pytest fastapi httpx uvicorn
 
 Open `http://127.0.0.1:8717/`. `GET /` issues an expiring local session and CSRF token. `POST /api/action` accepts typed actions. `GET /api/metrics` returns declared telemetry counters only, with no secrets.
 
+## Going live
+
+Defaults stay deterministic and fake: `ULTRON_ADAPTER=fake`, `ULTRON_UI_GENERATOR=fake`, and `ULTRON_MODULE_SYNTH=fake`. To use real seams on a machine with dependencies and credentials:
+
+```bash
+pip install hermes-agent
+export ULTRON_ADAPTER=pinned-hermes
+export ULTRON_UI_GENERATOR=model
+export ULTRON_MODULE_SYNTH=model
+export ULTRON_MODEL_BASE_URL=https://api.openai.com/v1
+export ULTRON_MODEL_API_KEY=...
+export ULTRON_MODEL_NAME=...
+.venv/bin/python -m ultron.app.server
+```
+
+The pinned Hermes path lazily imports `hermes-agent`, runs under an isolated HOME/workspace for each request, and never writes global Hermes state. The model path uses an OpenAI-compatible chat-completions endpoint through `httpx`. Missing `hermes-agent`, model env, or `httpx` fails closed with live-unavailable errors; Ultron does not substitute stub/fake results for selected live paths.
+
 ## Non-goals and MVP non-scope
 
 Ultron does not mutate vendored Hermes source, global Hermes memory or skills, terminal backends, credentials, cron/gateway/MCP configuration, or upstream runtime internals. Multi-user identity providers, remote tenants, live model operation, production key management, distributed sessions, and topology orchestration are outside this MVP; the local default principal is a single-user development boundary, not an enterprise auth system.

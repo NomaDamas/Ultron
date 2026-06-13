@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ultron.hermes.capability import AdapterCapabilityContract
+from ultron.module.contract import load_default_contract
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
 from ultron.module.blobs import BlobStore, BudgetPolicyBlob, PromptPack, SafetyPolicyBlob, ToolPolicyBlob, UiPanelContract
 from ultron.module.model import FitnessMetadata, HarnessModule, PersistencePolicy, PrivacyMetadata, PromotionState, TargetLens
 from ultron.registry.store import ModuleRegistry
-from ultron.ui.generator import LiveModelUnavailable
+from ultron.ui.generator import LiveModelUnavailable, ModelProvider
 
 
 class SynthesisPolicyConstraints(BaseModel):
@@ -93,6 +95,9 @@ class DeterministicFakeModuleSynthesizer:
 
 
 class LiveModelModuleSynthesizer:
+    def __init__(self, provider: ModelProvider | None = None) -> None:
+        self.provider = provider
+
     @property
     def is_live(self) -> bool:
         return True
@@ -111,8 +116,16 @@ class LiveModelModuleSynthesizer:
         }
 
     def synthesize(self, context: SynthesisContext) -> HarnessModule:
-        self.build_prompt(context)
-        raise LiveModelUnavailable("live model module synthesis requires a configured model")
+        if self.provider is None:
+            raise LiveModelUnavailable("live model module synthesis requires a configured model")
+        prompt = json.dumps(self.build_prompt(context), sort_keys=True)
+        text = self.provider.complete(prompt, "HarnessModule JSON matching the server schema; no permission expansion; content_hash must match identity")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("live model module synthesis returned invalid JSON") from exc
+        module = HarnessModule.model_validate(payload)
+        return validate_synthesized_module(module, load_default_contract(), parent=context.parent_module, registry=None)
 
 
 def validate_synthesized_module(

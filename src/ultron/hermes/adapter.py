@@ -148,8 +148,15 @@ class HermesInvocationPlan:
     isolated_workspace_path: str | None
     trajectory_tags: dict[str, str | None]
 
+class HermesRunner(Protocol):
+    def run_plan(self, plan: HermesInvocationPlan, isolated_root: str) -> Any: ...
+
+
 
 class PinnedHermesAdapter:
+    def __init__(self, runner: HermesRunner | None = None) -> None:
+        self.runner = runner
+
     @property
     def is_live(self) -> bool:
         return True
@@ -193,5 +200,24 @@ class PinnedHermesAdapter:
         )
 
     def run(self, request: AdapterRunRequest) -> AdapterRunResult:
-        self.build_invocation_plan(request)
-        raise LiveHermesUnavailable("Pinned Hermes execution is unavailable in this sandbox")
+        plan = self.build_invocation_plan(request)
+        if self.runner is None:
+            raise LiveHermesUnavailable("Pinned Hermes execution requires a Hermes runner")
+        if not request.isolated_root:
+            raise LiveHermesUnavailable("Pinned Hermes execution requires an isolated root")
+        result = self.runner.run_plan(plan, request.isolated_root)
+        snapshot = dict(result.model_snapshot)
+        snapshot["provider"] = result.model_provider
+        snapshot["name"] = result.model_name
+        return AdapterRunResult(
+            session_id=request.session_id,
+            trajectory_id=result.trajectory_id,
+            trajectory_path=result.trajectory_path,
+            model_provider=self.provider_id,
+            model_name=result.model_name,
+            model_snapshot={**snapshot, "runner_provider": result.model_provider, "runner_name": result.model_name},
+            output=dict(result.output),
+            tool_calls=result.tool_calls,
+            measured_guardrails=dict(result.measured_guardrails),
+            outcome_label="live_success",
+        )
