@@ -1,32 +1,48 @@
 ## Summary
-The three requested HIGH fixes are materially resolved for fail closed signing, durable atomic transition writes, and append only quarantine. I cannot approve the overall GAP3 state because durable promotion still bypasses the existing EvolutionLoop active set invariants and can exceed the configured durable active_module_cap without pruning or ledgering evictions.
+Re-review found the adapter-only benchmark path and live-stub guard mostly repaired, and the default rubric is now output-content based rather than module-count based. The promotion provenance gate is still bypassable because public evaluate_and_decide accepts caller-supplied provenance="benchmark_runner", so arbitrary fabricated PairedTask floats can still mint approvable evidence without BenchmarkRunner execution. Recommendation is request changes before approval.
 
 ## Analysis
-Fail closed signing is implemented in `src/ultron/run/manifest.py:66-79`: `RunManifest.sign` and `verify` require an explicit `ManifestSigner`, preserve `key_id` in the canonical payload, and return false for missing signatures or keys. `src/ultron/run/signer.py:31-53` resolves production material only through `EnvKeyProvider` and raises when `ULTRON_RUN_MANIFEST_SIGNING_SECRET` is absent. `src/ultron/app/triage.py:476-484` makes durable production construction use `EnvKeyProvider` unless a caller supplied signer is passed, while the source controlled fixture key is reachable only through `build_durable_triage_app_for_tests`; the in memory `TriageApp` default fixture path is unchanged as expected.
+Evidence inspected:
+- src/ultron/evaluation/harness.py: EvaluationReport.provenance defaults to "manual"; EvaluationHarness.evaluate_paired(..., provenance="manual") copies caller-provided provenance into the report.
+- src/ultron/app/triage.py: evaluate_and_decide(..., provenance="manual") is public and forwards that string directly to evaluate_paired; benchmark_and_decide passes provenance="benchmark_runner"; has_promotable_evidence accepts reports when report.provenance == "benchmark_runner" or allow_manual_promotable_evidence is true; approve_promotion mutates only after has_promotable_evidence passes.
+- src/ultron/evaluation/benchmark.py: BenchmarkRunner._execute requires the resolver to return AdapterRunRequest and always returns self.adapter.run(request); score_output uses issue keywords, risk, concrete test, and actionable references from adapter output, with no module-count scoring.
+- src/ultron/hermes/adapter.py: deterministic fake candidate output now includes risk, actionable_reference, and issue_reference while baseline output does not, giving a real output-quality delta.
+- tests/test_gap4_redteam.py: covers manual default provenance denial, no-op-vs-better rubric behavior, deterministic adapter execution, and live-stub benchmark rejection without stored evidence.
 
-Durable prune and restore are now routed through `PromotionUnitOfWork` in `src/ultron/app/triage.py:389-403`, and durable promotion uses it at `src/ultron/app/triage.py:348-358`. The unit of work at `src/ultron/persistence/unit_of_work.py:30-58` places lifecycle updates, active pointer CAS, and `POINTER_TRANSITION` ledger append in one `Database.tx` scope. The test suite covers stale CAS rollback for promotion in `tests/test_gap3_durable.py:86-104` and injected mid transaction ledger failure rollback for promote, prune, and restore in `tests/test_gap3_durable.py:117-144`.
+Stage 1 - Spec compliance:
+- Default manual evidence from evaluate_and_decide is denied by has_promotable_evidence, and approve_promotion raises before pointer mutation for that default path.
+- However, the public evaluate_and_decide provenance parameter is caller-controlled. A caller can supply fabricated paired tasks plus provenance="benchmark_runner"; the downstream gate then treats the report as benchmark evidence even though it did not come from benchmark_and_decide or BenchmarkRunner. This misses the central requirement that approvable evidence be real adapter-executed benchmark evidence.
+- No-op and equal-output candidates tie, while better output wins under the new fixture. Scoring ignores the old module_hash_count_at_least rubric key and is tied to adapter output content.
+- Benchmark execution always uses self.adapter.run, and live adapter stub/fake results are rejected before evidence storage.
 
-Append only quarantine is implemented by `src/ultron/persistence/sqlite_stores.py:224-256`, where quarantine state is derived from `ledger_quarantine_events`; `mark_quarantined` inserts an event and `promotable_entries` filters by the derived set. The in memory ledger mirrors this derivation in `src/ultron/ledger/side_effect_ledger.py:54-84`. The restart test in `tests/test_gap3_durable.py:163-175` confirms historical ledger rows remain `quarantined = 0`, one quarantine event is appended, and entries reload as quarantined after restart.
+Stage 2 - Architecture:
+- The intended boundary is benchmark_and_decide as the only producer of promotable benchmark provenance. That boundary is porous because provenance is a free string accepted by the public manual evaluation API rather than a private/internal capability derived from BenchmarkRunner completion.
+- The allow_manual_promotable_evidence escape hatch is test-scoped through build_durable_triage_app_for_tests, but it remains a mutable flag on the product object and weakens the invariant if reachable by non-test callers.
 
-The medium and low tests are present: feedback restart in `tests/test_gap3_durable.py:41-61`, WAL and future schema rejection in `tests/test_gap3_durable.py:75-83`, and manifest fail closed roundtrip in `tests/test_gap3_durable.py:200-213`. The inspected QA artifact `artifacts/gap3-qa.txt` reports 234 passed and 3 skipped.
+Stage 3 - Code quality/security/performance:
+- _section_has_content can count an empty dict/list section as non-empty when flattened output has another key after the section marker, so the risk-section criterion is weaker than advertised. This is less severe than the provenance bypass but should be tightened.
 
 ## Root Cause
-The remaining blocker is that durable promotion moved persistence writes into a unit of work but did not move or reapply the in memory `EvolutionLoop.retain` invariants. `src/ultron/app/triage.py:348-358` only appends the candidate to `active` and calls `PromotionUnitOfWork.promote`; `src/ultron/persistence/unit_of_work.py:20-27` has no promotion evictions or active cap input. In contrast, `src/ultron/evolution/loop.py:67-90` enforces stale pointer checks, active module cap, eviction selection, prune validation, lifecycle updates for evicted modules, and promotion cooldown state before returning.
+The fix models provenance as caller-supplied data instead of an unforgeable result of the benchmark execution path. has_promotable_evidence trusts report.provenance without proving the report was generated by benchmark_and_decide after adapter runs and live-result validation.
 
 ## Findings
-- HIGH: `src/ultron/app/triage.py:348-358` and `src/ultron/persistence/unit_of_work.py:20-58` leave durable promotion unable to mirror `EvolutionLoop.retain`. Impact: after a second durable promotion, the active set can grow beyond `active_module_cap = 2`, evicted modules are not marked `PRUNED`, and no prune side of the pointer transition is represented in the durable ledger. Fix: compute the same `new_active` and evicted set as `EvolutionLoop.retain`, validate prunes, and pass evicted hashes into a single promotion unit of work so candidate survivor, evicted pruned lifecycles, pointer CAS, and ledger payload commit atomically. Add a durable test that promotes two candidates and asserts cap, evicted lifecycle, and ledger contents.
+1. HIGH - src/ultron/app/triage.py:309-338, src/ultron/app/triage.py:383-403: Public manual evaluation can forge benchmark provenance. Impact: arbitrary fabricated PairedTask floats can mint approvable evidence by passing provenance="benchmark_runner", bypassing the intended real-adapter benchmark requirement. Fix: remove provenance from the public evaluate_and_decide API or make it private/internal; only benchmark_and_decide should call a private storage/evaluation helper that marks benchmark provenance after successful BenchmarkRunner execution and live validation.
+2. MEDIUM - src/ultron/app/triage.py:389-390, src/ultron/app/triage.py:543-544: allow_manual_promotable_evidence is a mutable product-object escape hatch. Impact: weakens the provenance invariant outside the intended benchmark path if enabled accidentally. Fix: isolate this to test-only helpers or durable-test fixtures without runtime product surface, or gate it behind explicit test configuration not available in production construction.
+3. LOW - src/ultron/evaluation/benchmark.py:128-137: _section_has_content can treat empty risk as non-empty in flattened dict output because it reads into the next key. Impact: the rubric may award risk-section credit without risk content. Fix: inspect structured dict fields directly for known sections before flattening, or bound section parsing to the current line/key only.
 
 ## Recommendations
-1. Extend durable promotion to preserve the in memory active set invariants, including active cap eviction and evicted lifecycle changes, inside `PromotionUnitOfWork`.
-2. Add tests for durable promotion cap eviction and for stale CAS rollback on prune and restore, even though the shared `_transition` implementation strongly suggests rollback correctness.
-3. Keep the current signing, quarantine, WAL, migration, feedback restart, and mid transaction rollback fixes.
+1. Block approval until benchmark provenance cannot be supplied by arbitrary callers. Make benchmark provenance private and derived from benchmark_and_decide only.
+2. Add a red-team test that calls evaluate_and_decide(..., provenance="benchmark_runner") with fabricated promotable tasks and asserts has_promotable_evidence remains false and approval does not mutate the pointer.
+3. Replace or remove allow_manual_promotable_evidence from product object construction; keep legacy durable tests on explicit benchmark evidence or a test-only adapter path.
+4. Tighten _section_has_content and add a test proving empty risk: [] / risk: "" does not score.
 
 ## Architectural Status
-`BLOCK`
+BLOCK
 
 ## Code Review Recommendation
-`REQUEST CHANGES`
+REQUEST CHANGES
 
 ## Trade-offs
-- Reusing `EvolutionLoop.retain` directly preserves behavior but needs an injectable transaction boundary or a persistence adapter that can ledger inside the same transaction.
-- Duplicating retain logic in durable promotion is faster to patch but risks future divergence. A helper that calculates the transition plan separately from storage side effects is the safer long term shape.
+- Private helper / no public provenance parameter: strongest invariant, small refactor, recommended.
+- Enum/string provenance with validation only: clearer typing but still forgeable if callers can choose benchmark_runner, not sufficient.
+- Keep allow_manual_promotable_evidence: convenient for legacy tests but preserves a safety escape hatch; acceptable only if impossible in production construction and clearly test-only.

@@ -74,6 +74,8 @@ class EvaluationReport(BaseModel):
     promotable: bool
     rationale: str
     provenance: str = "manual"
+    benchmark_fixture_id: str | None = None
+    benchmark_task_trajectory_ids: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class EvaluationHarness:
@@ -94,7 +96,6 @@ class EvaluationHarness:
         guardrails_before: GuardrailMetrics,
         guardrails_after: GuardrailMetrics,
         explicit_user_low_n: bool = False,
-        provenance: str = "manual",
     ) -> EvaluationReport:
         frozen.require_complete()
         if not tasks:
@@ -131,7 +132,7 @@ class EvaluationHarness:
             evidence_label=evidence_label,
             promotable=promotable,
             rationale=rationale,
-            provenance=provenance,
+            provenance="manual",
         )
 
     def _mean_primary_delta(self, tasks: list[PairedTask]) -> float:

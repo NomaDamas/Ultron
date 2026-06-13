@@ -5,6 +5,7 @@ import pytest
 
 from ultron.app.triage import build_durable_triage_app, build_durable_triage_app_for_tests
 from ultron.evaluation.harness import PairedTask
+from ultron.evaluation.benchmark import BenchmarkFixture, BenchmarkTask
 from ultron.evolution.variation import VariationPrimitive
 from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind
 from ultron.module.blobs import BlobKind, PromptPack, ToolPolicyBlob
@@ -51,6 +52,20 @@ def _assert_snapshot(app, module_hash, snapshot):
 def _tasks(n=12):
     return [PairedTask(task_id=f't{i}', baseline_metric=1.0, candidate_metric=1.2) for i in range(n)]
 
+def _fixture(n=12):
+    return BenchmarkFixture(
+        name='durable-test-fixture',
+        seed='durable-test-seed',
+        tasks=[
+            BenchmarkTask(
+                task_id=f't{i}',
+                request_text=f'durable request {i}',
+                rubric={'requires_risk_section': True, 'requires_concrete_test': True, 'requires_actionable_reference': True, 'issue_keywords': ['durable']}
+            )
+            for i in range(n)
+        ],
+    )
+
 
 def test_restart_durability_survives_full_triage_flow(tmp_path):
     db_path = tmp_path / 'triage.sqlite'
@@ -59,7 +74,7 @@ def test_restart_durability_survives_full_triage_flow(tmp_path):
     app.start_run('default-user', 'code-triage', 'request')
     canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': 'candidate-good-durable'})
     candidate_hash = canary['candidate'].content_hash
-    decision = app.evaluate_and_decide(candidate_hash, _tasks(), canary['canary_id'])
+    decision = app.benchmark_and_decide(candidate_hash, _fixture(), canary['canary_id'])
     version = app.current_pointer_version()
     app.approve_promotion(candidate_hash, version)
     promoted_version, promoted_hashes = app.pointer_store.get(app.pointer_key)
@@ -166,7 +181,7 @@ def test_durable_promotion_cap_eviction_matches_in_memory_and_is_reversible(tmp_
     for i in range(3):
         canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': f'candidate-cap-{i}'})
         h = canary['candidate'].content_hash
-        app.evaluate_and_decide(h, _tasks(), canary['canary_id'])
+        app.benchmark_and_decide(h, _fixture(), canary['canary_id'])
         plan = plan_active_set_transition(app.registry, h, expected_active, app.evolution_loop.controls.active_module_cap)
         expected_active = plan.new_active
         evicted_by_plan.extend(plan.evicted)
@@ -201,11 +216,11 @@ def test_durable_promotion_with_eviction_rolls_back_all_state_on_mid_tx_failure(
     baseline = app.seed_baseline()
     canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': 'candidate-cap-midfail-0'})
     first = canary['candidate'].content_hash
-    app.evaluate_and_decide(first, _tasks(), canary['canary_id'])
+    app.benchmark_and_decide(first, _fixture(), canary['canary_id'])
     app.approve_promotion(first, app.current_pointer_version())
     canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': 'candidate-cap-midfail-1'})
     second = canary['candidate'].content_hash
-    app.evaluate_and_decide(second, _tasks(), canary['canary_id'])
+    app.benchmark_and_decide(second, _fixture(), canary['canary_id'])
     report = app.evaluated_candidates.get(second)['report']
     before_pointer = app.pointer_store.get(app.pointer_key)
     evicted_hash = plan_active_set_transition(app.registry, second, before_pointer[1], app.evolution_loop.controls.active_module_cap).evicted[0]
@@ -235,7 +250,7 @@ def test_durable_atrophy_restore_uses_uow_and_ledgers_both_transitions(tmp_path)
     app.seed_baseline()
     canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {'prompt_pack_hash': 'candidate-atrophy'})
     h = canary['candidate'].content_hash
-    app.evaluate_and_decide(h, _tasks(), canary['canary_id'])
+    app.benchmark_and_decide(h, _fixture(), canary['canary_id'])
     app.approve_promotion(h, app.current_pointer_version())
     before_count = len(app.ledger.promotable_entries())
     app.atrophy_and_restore(h)

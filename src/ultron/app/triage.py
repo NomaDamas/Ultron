@@ -68,7 +68,6 @@ class TriageApp:
         )
         self.feedback_channel = FeedbackChannel()
         self.adapter = adapter or DeterministicFakeHermesAdapter()
-        self.allow_manual_promotable_evidence = False
         self.evaluation_harness = EvaluationHarness(self.selector, self.thresholds)
         self.frozen_versions = FrozenVersions(
             hermes_version="pinned-hermes-ref",
@@ -313,7 +312,6 @@ class TriageApp:
         canary_id: str | None = None,
         guardrails_before: GuardrailMetrics | None = None,
         guardrails_after: GuardrailMetrics | None = None,
-        provenance: str = "manual",
     ) -> dict[str, Any]:
         canary_id = canary_id or self.last_canary_id or f"canary-{candidate_hash[:12]}"
         before = guardrails_before or GuardrailMetrics()
@@ -325,7 +323,6 @@ class TriageApp:
             paired_tasks,
             before,
             after,
-            provenance=provenance,
         )
         outcome = self.selector.evaluate(
             candidate_hash,
@@ -357,14 +354,26 @@ class TriageApp:
         paired_tasks = runner.run_paired(baseline_hashes, candidate_hashes, fixture)
         for result in runner.results:
             self._validate_live_adapter_result(result)
-        return self.evaluate_and_decide(
+        decision = self.evaluate_and_decide(
             candidate_hash,
             paired_tasks,
             canary_id or self.last_canary_id,
             runner.guardrails_before,
             runner.guardrails_after,
-            provenance="benchmark_runner",
         )
+        trajectory_ids_by_task: dict[str, list[str]] = {task.task_id: [] for task in fixture.tasks}
+        for task, baseline_result, candidate_result in zip(fixture.tasks, runner.results[0::2], runner.results[1::2], strict=True):
+            trajectory_ids_by_task[task.task_id] = [baseline_result.trajectory_id, candidate_result.trajectory_id]
+        report = decision["report"].model_copy(
+            update={
+                "provenance": "benchmark_runner",
+                "benchmark_fixture_id": fixture.name,
+                "benchmark_task_trajectory_ids": trajectory_ids_by_task,
+            }
+        )
+        decision["report"] = report
+        self.evaluated_candidates[candidate_hash] = {"report": report, "outcome": decision["outcome"], "canary_id": decision["canary_id"]}
+        return decision
 
     def _benchmark_request(self, module_hashes: list[str], task: Any, side: str) -> AdapterRunRequest:
         manifest = self.resolver.resolve(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "triage", module_hashes, {item.value for item in self.ui_registry})
@@ -387,7 +396,10 @@ class TriageApp:
         report = stored["report"]
         outcome = stored["outcome"]
         return bool(
-            (report.provenance == "benchmark_runner" or self.allow_manual_promotable_evidence)
+            report.provenance == "benchmark_runner"
+            and bool(report.benchmark_fixture_id)
+            and len(report.benchmark_task_trajectory_ids) == report.paired_tasks
+            and all(ids and all(isinstance(item, str) and item.strip() for item in ids) for ids in report.benchmark_task_trajectory_ids.values())
             and report.evidence_label in PROMOTABLE_EVIDENCE_LABELS
             and report.promotable
             and outcome.promotable
@@ -540,9 +552,7 @@ def build_durable_triage_app(db_path: str, *, signer: ManifestSigner | None = No
 def build_durable_triage_app_for_tests(db_path: str, *, signer: ManifestSigner | None = None) -> TriageApp:
     """Build a durable app with an explicit fixture signer for tests and local fixtures only."""
     fixture_signer = signer or ManifestSigner.from_provider("fixture-dev", FixtureKeyProvider({"fixture-dev": "ultron-dev-run-manifest-key"}))
-    app = _build_durable_triage_app(db_path, signer=fixture_signer)
-    app.allow_manual_promotable_evidence = True
-    return app
+    return _build_durable_triage_app(db_path, signer=fixture_signer)
 
 
 def _build_durable_triage_app(db_path: str, *, signer: ManifestSigner) -> TriageApp:

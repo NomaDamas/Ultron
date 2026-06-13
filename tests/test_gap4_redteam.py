@@ -204,6 +204,43 @@ def test_manual_evaluate_promotable_floats_are_not_approval_evidence() -> None:
         app.approve_promotion(candidate_hash, before_pointer[0])
     assert app.pointer_store.get(app.pointer_key) == before_pointer
 
+    with pytest.raises(TypeError):
+        app.evaluate_and_decide(candidate_hash, _promotable_tasks(10), canary["canary_id"], provenance="benchmark_runner")
+
+
+def test_no_manual_promotion_escape_hatch_attribute() -> None:
+    app = TriageApp()
+
+    assert not hasattr(app, "allow_manual_promotable_evidence")
+
+
+def test_benchmark_evidence_requires_real_trajectory_ids() -> None:
+    app = TriageApp()
+    app.seed_baseline()
+    canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "bound-evidence"})
+    candidate_hash = canary["candidate"].content_hash or ""
+    decision = app.benchmark_and_decide(candidate_hash, _quality_fixture(), canary["canary_id"])
+    report = decision["report"]
+
+    assert report.provenance == "benchmark_runner"
+    assert report.benchmark_fixture_id == _quality_fixture().name
+    assert len(report.benchmark_task_trajectory_ids) == report.paired_tasks
+    assert all(len(ids) == 2 and all(item for item in ids) for ids in report.benchmark_task_trajectory_ids.values())
+    assert app.has_promotable_evidence(candidate_hash) is True
+
+    app.evaluated_candidates[candidate_hash]["report"] = report.model_copy(update={"benchmark_task_trajectory_ids": {}})
+    assert app.has_promotable_evidence(candidate_hash) is False
+    with pytest.raises(PermissionError):
+        app.approve_promotion(candidate_hash, app.current_pointer_version())
+
+
+def test_empty_risk_section_does_not_receive_risk_credit() -> None:
+    rubric = {"requires_risk_section": True, "requires_concrete_test": True, "requires_actionable_reference": True}
+
+    score = benchmark_module.score_output({"text": "risk:   \n tests: pytest tests/test_gap4_redteam.py assert\n source: src/ultron/app/triage.py"}, rubric)
+
+    assert score == pytest.approx(2 / 3)
+
 
 def test_quality_rubric_noop_candidate_does_not_beat_baseline_but_better_candidate_does() -> None:
     fixture = _quality_fixture()

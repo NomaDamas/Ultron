@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any, Callable, Protocol
 
@@ -160,9 +161,11 @@ def _section_has_content(text: str, section: str) -> bool:
     index = text.find(marker)
     if index < 0:
         return False
-    rest = text[index + len(marker):].strip()
-    first_line = rest.splitlines()[0].strip() if rest else ""
-    return bool(first_line and first_line not in {"[]", "{}"})
+    rest = text[index + len(marker):]
+    next_section = re.search(r"\n\s*[a-z][a-z0-9 _-]{1,40}:\s*", rest)
+    content = rest[: next_section.start()] if next_section else rest
+    normalized = content.strip()
+    return bool(normalized and normalized not in {"[]", "{}", "-", "none", "n/a"})
 
 
 def _has_concrete_test(text: str) -> bool:
