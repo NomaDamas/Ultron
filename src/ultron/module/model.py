@@ -8,6 +8,8 @@ from enum import StrEnum
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field
+from ultron.module.blobs import BlobKind, BlobStore, BudgetPolicyBlob, PromptPack, SafetyPolicyBlob, ToolPolicyBlob, UiPanelContract
+
 
 from ultron.hermes.capability import AdapterCapabilityContract, AttachSurface, CapabilityStatus
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
@@ -116,6 +118,38 @@ class HarnessModule(BaseModel):
     def create(cls, **data: Any) -> Self:
         """Build and finalize a harness module in one step."""
         return cls.model_validate(data).finalized()
+
+    @classmethod
+    def create_with_blobs(
+        cls,
+        blob_store: BlobStore,
+        *,
+        prompt_pack: PromptPack,
+        tools: ToolPolicyBlob,
+        ui: UiPanelContract,
+        safety: SafetyPolicyBlob,
+        budget: BudgetPolicyBlob,
+        **identity_fields: Any,
+    ) -> Self:
+        """Build a finalized module whose artifact hash fields reference stored blobs."""
+        blob_hashes = {
+            "prompt_pack_hash": blob_store.put(BlobKind.PROMPT_PACK, prompt_pack),
+            "tool_allowlist_hash": blob_store.put(BlobKind.TOOL_POLICY, tools),
+            "ui_panel_contract_hash": blob_store.put(BlobKind.UI_PANEL_CONTRACT, ui),
+            "safety_policy_hash": blob_store.put(BlobKind.SAFETY_POLICY, safety),
+            "budget_policy_hash": blob_store.put(BlobKind.BUDGET_POLICY, budget),
+        }
+        return cls.create(**identity_fields, **blob_hashes)
+
+    def referenced_blob_hashes(self) -> dict[BlobKind, str | None]:
+        """Return the artifact blob references carried by this module."""
+        return {
+            BlobKind.PROMPT_PACK: self.prompt_pack_hash,
+            BlobKind.TOOL_POLICY: self.tool_allowlist_hash,
+            BlobKind.UI_PANEL_CONTRACT: self.ui_panel_contract_hash,
+            BlobKind.SAFETY_POLICY: self.safety_policy_hash,
+            BlobKind.BUDGET_POLICY: self.budget_policy_hash,
+        }
 
     def validate_surfaces(self, contract: AdapterCapabilityContract) -> None:
         """Validate declared and required attach surfaces against the adapter contract."""

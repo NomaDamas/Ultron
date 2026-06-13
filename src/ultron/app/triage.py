@@ -19,6 +19,8 @@ from ultron.module.contract import load_default_contract
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
 from ultron.ledger.canary_store import CanaryScopedStore, RollbackController
 from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind, SideEffectLedger
+from ultron.module.blobs import BlobStore, BudgetPolicyBlob, PromptPack, SafetyPolicyBlob, ToolPolicyBlob, UiPanelContract
+
 from ultron.module.model import EvidenceLabel, FitnessMetadata, HarnessModule, PersistencePolicy, PrivacyMetadata, PromotionState, TargetLens
 from ultron.registry.pointer import ActivePointerStore
 from ultron.registry.store import ModuleLifecycle, ModuleRegistry
@@ -42,7 +44,9 @@ class TriageApp:
     def __init__(self, adapter: HermesAdapter | None = None) -> None:
         self.ui_registry: set[ComponentType] = set(ComponentType)
         self.adapter_contract = load_default_contract()
-        self.registry = ModuleRegistry()
+        self.blob_store = BlobStore()
+        self.registry = ModuleRegistry(self.blob_store)
+
         self.pointer_store = ActivePointerStore()
         self.resolver = CompositionResolver(self.registry, self.adapter_contract)
         self.ledger = SideEffectLedger()
@@ -86,7 +90,24 @@ class TriageApp:
         existing_version, existing_hashes = self.pointer_store.get(self.pointer_key)
         if existing_hashes:
             return self.registry.get(existing_hashes[0]).module
-        module = HarnessModule.create(
+        baseline_prompt_slots = {
+            "triage.plan": "Read the request and produce a concise implementation plan with ordered steps and assumptions.",
+            "triage.risk": "Identify safety, compatibility, and regression risks before making changes.",
+            "triage.tests": "Select focused verification that covers changed behavior and important edge cases.",
+        }
+        baseline_tools = ["read", "search", "pytest"]
+        baseline_panels = [
+            f"{ComponentType.INTAKE_PANEL.value}:0",
+            f"{ComponentType.PLAN_PANEL.value}:10",
+            f"{ComponentType.RISK_PANEL.value}:20",
+            f"{ComponentType.TEST_PANEL.value}:30",
+            f"{ComponentType.FEEDBACK_PANEL.value}:40",
+            f"{ComponentType.APPROVAL_PANEL.value}:50",
+            f"{ComponentType.ROLLBACK_PANEL.value}:60",
+        ]
+
+        module = HarnessModule.create_with_blobs(
+            self.blob_store,
             module_id="code_triage_v0",
             name="Code Triage Baseline",
             version=1,
@@ -94,26 +115,18 @@ class TriageApp:
             target_lens=TargetLens.DEVELOPER,
             owner_scope=DEFAULT_SCOPE,
             surfaces=ModuleSurfaceContract(
-                prompt_slots=["triage.plan", "triage.risk", "triage.tests"],
-                tools=["read", "search", "pytest"],
-                ui_panels=[
-                    f"{ComponentType.INTAKE_PANEL.value}:0",
-                    f"{ComponentType.PLAN_PANEL.value}:10",
-                    f"{ComponentType.RISK_PANEL.value}:20",
-                    f"{ComponentType.TEST_PANEL.value}:30",
-                    f"{ComponentType.FEEDBACK_PANEL.value}:40",
-                    f"{ComponentType.APPROVAL_PANEL.value}:50",
-                    f"{ComponentType.ROLLBACK_PANEL.value}:60",
-                ],
+                prompt_slots=list(baseline_prompt_slots),
+                tools=list(baseline_tools),
+                ui_panels=list(baseline_panels),
                 safety={"workspace_writes": False, "external_calls": False},
                 budget={"max_tool_calls": 8},
                 persistence={"mode": PersistencePolicy.ISOLATED.value},
             ),
-            prompt_pack_hash="baseline-prompt-pack-g007",
-            tool_allowlist_hash="baseline-tools-g007",
-            ui_panel_contract_hash="baseline-ui-panels-g007",
-            safety_policy_hash="baseline-safety-g007",
-            budget_policy_hash="baseline-budget-g007",
+            prompt_pack=PromptPack(slots=baseline_prompt_slots, notes="Baseline code triage prompt pack."),
+            tools=ToolPolicyBlob(tools=baseline_tools, rationale="Baseline read/search/test triage tools."),
+            ui=UiPanelContract(panels=baseline_panels, notes="Baseline triage UI panel order."),
+            safety=SafetyPolicyBlob(workspace_writes=False, external_calls=False),
+            budget=BudgetPolicyBlob(max_tool_calls=8),
             persistence_policy=PersistencePolicy.ISOLATED,
             hermes_version_range="pinned",
             privacy=PrivacyMetadata(owner_scope=DEFAULT_SCOPE, data_classes=["operational"], consent_basis="seed"),

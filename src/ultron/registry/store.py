@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import time
+import string
+
 from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from ultron.module.blobs import BlobStore
+
 
 from ultron.module.model import HarnessModule, PersistencePolicy, PromotionState
 
@@ -46,9 +50,11 @@ class RegistryEntry(BaseModel):
 class ModuleRegistry:
     """Content-addressed registry keyed by HarnessModule.content_hash."""
 
-    def __init__(self) -> None:
+    def __init__(self, blob_store: BlobStore | None = None) -> None:
         self._entries: dict[str, RegistryEntry] = {}
         self._registration_returns: dict[str, RegistryEntry] = {}
+        self.blob_store = blob_store
+
 
     def register(
         self,
@@ -62,6 +68,8 @@ class ModuleRegistry:
     ) -> RegistryEntry:
         if layer == "global" and not (consent_ok and redacted):
             raise ValueError("global modules require consent_ok=True and redacted=True")
+
+        self._verify_blob_references(module)
 
         finalized = module.finalized()
         supplied_hash = module.content_hash or finalized.content_hash
@@ -119,6 +127,22 @@ class ModuleRegistry:
         self._registration_returns[content_hash] = updated.model_copy(deep=True)
         return updated.model_copy(deep=True)
 
+    def _verify_blob_references(self, module: HarnessModule) -> None:
+        if self.blob_store is None:
+            return
+        for kind, content_hash in module.referenced_blob_hashes().items():
+            if content_hash is None:
+                continue
+            if not _is_sha256_hex(content_hash):
+                continue
+
+            if not self.blob_store.has(kind, content_hash):
+                raise ValueError(f"missing blob for {kind.value}: {content_hash}")
+            stored = self.blob_store.get(kind, content_hash)
+            actual_hash = stored.content_hash()
+            if actual_hash != content_hash:
+                raise ValueError(f"blob hash mismatch for {kind.value}: expected {content_hash}, got {actual_hash}")
+
     def can_auto_promote(self, content_hash_or_module: str | HarnessModule) -> bool:
         if isinstance(content_hash_or_module, HarnessModule):
             candidate = content_hash_or_module.finalized()
@@ -163,3 +187,7 @@ def _persistence_rank(policy: PersistencePolicy) -> int:
         PersistencePolicy.CHECKPOINTED: 2,
         PersistencePolicy.NORMAL: 3,
     }[policy]
+
+
+def _is_sha256_hex(value: str) -> bool:
+    return len(value) == 64 and all(char in string.hexdigits for char in value)
