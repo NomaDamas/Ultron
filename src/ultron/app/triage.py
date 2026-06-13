@@ -21,6 +21,7 @@ from ultron.feedback.channel import ConsentClass, FeedbackChannel, FeedbackEvent
 from ultron.feedback.aggregation import FeedbackAggregator, FeedbackSummary, canonical_rating_payload
 from ultron.module.contract import load_default_contract
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
+from ultron.synthesis.module_synthesizer import DeterministicFakeModuleSynthesizer, SynthesisContext, SynthesisPolicyConstraints
 from ultron.ledger.canary_store import CanaryScopedStore, RollbackController
 from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind, SideEffectLedger
 from ultron.module.blobs import BlobStore, BudgetPolicyBlob, PromptPack, SafetyPolicyBlob, ToolPolicyBlob, UiPanelContract
@@ -32,7 +33,8 @@ from ultron.run.manifest import RunManifest
 from ultron.persistence.db import Database
 from ultron.persistence.sqlite_stores import SqliteActivePointerStore, SqliteBlobStore, SqliteEvaluatedCandidateStore, SqliteFeedbackChannel, SqliteModuleRegistry, SqliteSideEffectLedger
 from ultron.run.signer import EnvKeyProvider, FixtureKeyProvider, ManifestSigner
-from ultron.ui.runtime import ComponentType, UiSpec, build_uispec_from_manifest
+from ultron.ui.generator import DeterministicFakeUiSpecGenerator, UiGenContext
+from ultron.ui.runtime import ComponentType, UiSpec
 
 
 DEFAULT_SCOPE = "default-user"
@@ -61,6 +63,8 @@ class TriageApp:
         self.canary_store = CanaryScopedStore()
         self.rollback_controller = RollbackController(self.registry, self.ledger, self.canary_store, self.pointer_store)
         self.variation_engine = VariationEngine(self.registry, self.adapter_contract, self.blob_store)
+        self.ui_generator = DeterministicFakeUiSpecGenerator()
+        self.module_synthesizer = DeterministicFakeModuleSynthesizer(self.blob_store, self.adapter_contract)
         self.thresholds = SelectionThresholds(min_paired_tasks=10, min_primary_improvement=0.10)
         self.selector = Selector(self.thresholds)
         self.evolution_loop = EvolutionLoop(
@@ -152,7 +156,7 @@ class TriageApp:
         self.seed_baseline()
         version, active = self.pointer_store.get(self.pointer_key)
         manifest = self.resolver.resolve(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "triage", active, {item.value for item in self.ui_registry})
-        spec = build_uispec_from_manifest(manifest, self.ui_registry)
+        spec = self._generate_uispec(manifest, "triage")
         self.last_ui_spec = spec
         return spec
 
@@ -169,7 +173,7 @@ class TriageApp:
             should_bootstrap_pointer = True
             version = 1
         manifest = self.resolver.resolve(user_scope, workflow_fingerprint, "triage", active, {item.value for item in self.ui_registry})
-        ui_spec = build_uispec_from_manifest(manifest, self.ui_registry)
+        ui_spec = self._generate_uispec(manifest, "triage", {"request_text": request_text})
         run_id = uuid.uuid4().hex
         session_id = uuid.uuid4().hex
         active_module_set_id = f"{user_scope}:{workflow_fingerprint}:v{version}"
@@ -260,7 +264,7 @@ class TriageApp:
         canary_id = f"canary-{candidate_hash[:12]}"
         candidate_active = list(active) + [candidate_hash]
         manifest = CompositionResolver(staging_registry, self.adapter_contract).resolve(DEFAULT_SCOPE, DEFAULT_WORKFLOW, "triage", candidate_active, {item.value for item in self.ui_registry})
-        ui_spec = build_uispec_from_manifest(manifest, self.ui_registry)
+        ui_spec = self._generate_uispec(manifest, "triage", {"request_text": request_text, "candidate_hash": candidate_hash})
         run_id = uuid.uuid4().hex
         session_id = uuid.uuid4().hex
         active_module_set_id = f"{DEFAULT_SCOPE}:{DEFAULT_WORKFLOW}:canary"
@@ -448,6 +452,39 @@ class TriageApp:
             retained = self.evolution_loop.retain(candidate_hash, outcome, DEFAULT_SCOPE, DEFAULT_WORKFLOW, expected_pointer_version)
         return {"report": report, "outcome": outcome, "promoted": retained, "canary_id": stored.get("canary_id")}
 
+    def synthesize_candidate(self, request_text: str, parent_hash: str | None = None) -> dict[str, Any]:
+        self.seed_baseline()
+        version, active = self.pointer_store.get(self.pointer_key)
+        parent_hash = parent_hash or active[-1]
+        parent = self.registry.get(parent_hash).module
+        context = SynthesisContext(
+            request_text=request_text,
+            workflow_fingerprint=DEFAULT_WORKFLOW,
+            parent_module=parent,
+            feedback_summary=self.feedback_summary(parent_hash),
+            eval_summary=self.evaluated_candidates.get(parent_hash),
+            policy_constraints=SynthesisPolicyConstraints(allowed_surfaces=parent.surfaces, no_permission_expansion=True),
+        )
+        candidate = self.module_synthesizer.synthesize(context)
+        candidate_hash = candidate.content_hash or ""
+        canary_id = f"canary-{candidate_hash[:12]}"
+        self.registry.register(candidate, ModuleLifecycle.CANDIDATE, "canary", human_approved_additive=False)
+        self.evolution_loop.register_candidate(candidate_hash)
+        self.canary_store.write(canary_id, "adapter_state", "candidate_hash", candidate_hash)
+        self.canary_store.write(canary_id, "memory", "request", request_text)
+        self.rollback_controller.track_pointer_candidate(
+            canary_id,
+            self.pointer_key,
+            version,
+            active,
+            list(active) + [candidate_hash],
+            run_id="synthesis-canary-pointer",
+            module_set_hash=candidate_hash,
+        )
+        self.last_candidate_hash = candidate_hash
+        self.last_canary_id = canary_id
+        return {"candidate": candidate, "canary_id": canary_id, "registered": True, "promotable": self.has_promotable_evidence(candidate_hash)}
+
     def canary_active(self, canary_id: str) -> bool:
         return bool(canary_id and self.canary_store.read(canary_id, "adapter_state", "candidate_hash"))
 
@@ -588,6 +625,15 @@ class TriageApp:
             restored = self.evolution_loop.restore(target, DEFAULT_SCOPE, DEFAULT_WORKFLOW, restore_version)
         return {"module_hash": target, "pruned": pruned, "restored": restored}
 
+    def _generate_uispec(self, manifest: Any, request_class: str, run_output_summary: dict[str, Any] | None = None) -> UiSpec:
+        return self.ui_generator.generate(
+            UiGenContext(
+                module_set_manifest=manifest,
+                request_class=request_class,
+                run_output_summary=run_output_summary or {},
+                allowed_registry=sorted(self.ui_registry, key=lambda item: item.value),
+            )
+        )
     def _build_adapter_request(
         self,
         manifest: Any,

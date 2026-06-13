@@ -1,0 +1,1 @@
+"""Generative synthesis seams."""
