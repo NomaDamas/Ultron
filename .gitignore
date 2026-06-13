@@ -9,3 +9,4 @@ build/
 .ultron_runtime/
 *.log
 artifacts/server*.log
+.gjc/
