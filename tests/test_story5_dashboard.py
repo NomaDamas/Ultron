@@ -178,6 +178,60 @@ def test_submit_request_attributes_canary_run_and_ledger_to_actor():
     assert all(entry.actor == "local-operator" for entry in canary_entries)
 
 
+def test_actorless_propose_and_canary_defaults_pointer_transition_actor():
+    client = _client()
+    engine = client.app.state.triage
+
+    result = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "story5 actorless canary"})
+
+    entries = [entry for entry in engine._ledger_entries() if entry.canary_id == result["canary_id"] and entry.kind is SideEffectKind.POINTER_TRANSITION]
+    assert entries
+    assert all(entry.actor == "local-operator" for entry in entries)
+    assert all(entry.payload.get("actor") == "local-operator" for entry in entries)
+
+
+def test_actorless_approve_promotion_defaults_pointer_transition_actor():
+    client = _client()
+    engine = client.app.state.triage
+    result = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "story5 actorless promotion"})
+    target = result["candidate"].content_hash
+    engine.benchmark_and_decide(target, canary_id=result["canary_id"])
+
+    promotion = engine.approve_promotion(target, engine.current_pointer_version())
+
+    assert promotion["promoted"] is True
+    entries = [entry for entry in engine._ledger_entries() if entry.kind is SideEffectKind.POINTER_TRANSITION and entry.module_hash == target]
+    assert entries
+    assert entries[-1].actor == "local-operator"
+    assert entries[-1].payload["actor"] == "local-operator"
+
+
+def test_pointer_and_quarantine_ledgers_never_have_empty_actor_after_full_flow():
+    client = _client()
+    engine = client.app.state.triage
+    engine.evolution_loop.controls = StabilityControls(active_module_cap=4, diversity_floor=1, promotion_cooldown_s=0, prune_cooldown_s=0)
+
+    submit = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "story5 no null actors submit"})
+    target = submit["candidate"].content_hash
+    engine.benchmark_and_decide(target, canary_id=submit["canary_id"])
+    engine.approve_promotion(target, engine.current_pointer_version())
+
+    rollback = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "story5 no null actors rollback"})
+    engine.rollback_controller.rollback(rollback["canary_id"], actor="local-operator")
+
+    candidate = engine.registry.get(target).module.model_copy(
+        update={"fitness": FitnessMetadata(primary_metric=-1.0, usage_count=0, last_used_at=1.0, decay_score=1.0, promotion_state=PromotionState.SURVIVOR)},
+        deep=True,
+    )
+    engine._store_fitness_update(target, candidate)
+    engine.run_atrophy_scan(1000.0)
+    engine.atrophy_and_restore(target)
+
+    audited = [entry for entry in engine._ledger_entries() if entry.kind in {SideEffectKind.POINTER_TRANSITION, SideEffectKind.QUARANTINE}]
+    assert audited
+    assert all(entry.actor and entry.actor.strip() for entry in audited)
+    assert all(entry.payload["actor"] and entry.payload["actor"].strip() for entry in audited if "actor" in entry.payload)
+
 def test_restore_module_in_memory_records_prune_and_restore_actor_ledgers():
     client = _client()
     csrf = _csrf(client)

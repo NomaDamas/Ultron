@@ -178,7 +178,7 @@ class TriageApp:
         entry = self.registry.register(module, ModuleLifecycle.SURVIVOR, "user")
         self.pointer_store.swap(self.pointer_key, existing_version, [entry.module.content_hash or ""])
         self.evolution_loop.mark_critical_seed(entry.module.content_hash or "")
-        self._append_ledger("seed", "seed", entry.module.content_hash, None, SideEffectKind.POINTER_TRANSITION, {"active": [entry.module.content_hash]})
+        self._append_ledger("seed", "seed", entry.module.content_hash, None, SideEffectKind.POINTER_TRANSITION, {"active": [entry.module.content_hash], "actor": DEFAULT_LOCAL_PRINCIPAL.subject})
         self.frozen_versions = self.frozen_versions.model_copy(update={"baseline_module_set_hash": entry.module.content_hash or ""})
         return entry.module
 
@@ -580,6 +580,7 @@ class TriageApp:
             list(active) + [candidate_hash],
             run_id="personalization-canary-pointer",
             module_set_hash=candidate_hash,
+            actor=DEFAULT_LOCAL_PRINCIPAL.subject,
         )
         self.last_candidate_hash = candidate_hash
         self.last_canary_id = canary_id
@@ -597,6 +598,7 @@ class TriageApp:
         return planned.model_copy(update={"primitive": VariationPrimitive.BUDGET_TIGHTEN, "change": {"budget": {"max_tool_calls": max(1, max_tool_calls - 1)}}, "rationale": rationale})
 
     def propose_and_canary(self, primitive: VariationPrimitive | str, change: dict[str, Any], request_text: str = "candidate triage", actor: str | None = None) -> dict[str, Any]:
+        audit_actor = actor or DEFAULT_LOCAL_PRINCIPAL.subject
         self.seed_baseline()
         version, active = self.pointer_store.get(self.pointer_key)
         parent_hash = active[-1]
@@ -637,6 +639,7 @@ class TriageApp:
             candidate_active,
             run_id="canary-pointer",
             module_set_hash=candidate_hash,
+            actor=audit_actor,
         )
         if self.manifest_signer is None:
             raise ValueError("run manifest signing requires an explicit signer")
@@ -657,10 +660,10 @@ class TriageApp:
             variation_primitive_id=proposal.primitive.value,
             canary_id=canary_id,
             resolved_ui_spec_hash=ui_spec.spec_hash,
-            actor=actor,
+            actor=audit_actor,
         ).sign(signer=self.manifest_signer)
         result_payload = result.model_dump(mode="json")
-        self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", candidate_hash, canary_id, SideEffectKind.ADAPTER_STATE, result_payload, actor=actor)
+        self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", candidate_hash, canary_id, SideEffectKind.ADAPTER_STATE, result_payload, actor=audit_actor)
         self.run_manifests.append(run_manifest.model_copy(deep=True))
         self.last_candidate_hash = candidate_hash
         self.last_canary_id = canary_id
@@ -771,6 +774,7 @@ class TriageApp:
         )
 
     def approve_promotion(self, candidate_hash: str, expected_pointer_version: int, actor: str | None = None) -> dict[str, Any]:
+        audit_actor = actor or DEFAULT_LOCAL_PRINCIPAL.subject
         stored = self.evaluated_candidates.get(candidate_hash)
         if stored is None:
             raise PolicyDenied("candidate has no stored evaluation evidence")
@@ -791,7 +795,7 @@ class TriageApp:
                 expected_pointer_version,
                 list(active),
                 evidence_id=report.frozen_versions_hash,
-                actor=actor or DEFAULT_LOCAL_PRINCIPAL.subject,
+                actor=audit_actor,
                 key=self.pointer_key,
                 active_module_cap=active_module_cap,
             )
@@ -799,8 +803,8 @@ class TriageApp:
         else:
             retained = self.evolution_loop.retain(candidate_hash, outcome, DEFAULT_SCOPE, DEFAULT_WORKFLOW, expected_pointer_version)
         if retained:
-            self.telemetry.increment("promotions", event="promotion", subject=actor)
-            self._append_ledger("promotion", candidate_hash, candidate_hash, stored.get("canary_id"), SideEffectKind.POINTER_TRANSITION, {"action": "APPROVE_PROMOTION", "candidate_hash": candidate_hash, "actor": actor}, actor=actor)
+            self.telemetry.increment("promotions", event="promotion", subject=audit_actor)
+            self._append_ledger("promotion", candidate_hash, candidate_hash, stored.get("canary_id"), SideEffectKind.POINTER_TRANSITION, {"action": "APPROVE_PROMOTION", "candidate_hash": candidate_hash, "actor": audit_actor}, actor=audit_actor)
         return {"report": report, "outcome": outcome, "promoted": retained, "canary_id": stored.get("canary_id")}
 
     def synthesize_candidate(self, request_text: str, parent_hash: str | None = None) -> dict[str, Any]:
@@ -836,6 +840,7 @@ class TriageApp:
             list(active) + [candidate_hash],
             run_id="synthesis-canary-pointer",
             module_set_hash=candidate_hash,
+            actor=DEFAULT_LOCAL_PRINCIPAL.subject,
         )
         self.last_candidate_hash = candidate_hash
         self.last_canary_id = canary_id
@@ -1224,7 +1229,10 @@ class TriageApp:
             raise ValueError("live Hermes adapter provider mismatch")
 
     def _append_ledger(self, run_id: str, module_set_hash: str, module_hash: str | None, canary_id: str | None, kind: SideEffectKind, payload: dict[str, Any], actor: str | None = None) -> None:
-        self.ledger.append(LedgerEntry(run_id=run_id, module_set_hash=module_set_hash, module_hash=module_hash, canary_id=canary_id, kind=kind, payload=payload, actor=actor))
+        audit_actor = actor or DEFAULT_LOCAL_PRINCIPAL.subject if kind in {SideEffectKind.POINTER_TRANSITION, SideEffectKind.CANDIDATE_LIFECYCLE, SideEffectKind.QUARANTINE} else actor
+        if audit_actor and "actor" in payload and not payload.get("actor"):
+            payload = {**payload, "actor": audit_actor}
+        self.ledger.append(LedgerEntry(run_id=run_id, module_set_hash=module_set_hash, module_hash=module_hash, canary_id=canary_id, kind=kind, payload=payload, actor=audit_actor))
 
 
 def _short_hash(value: str | None) -> str | None:

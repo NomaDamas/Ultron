@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ultron.auth.principal import DEFAULT_LOCAL_PRINCIPAL
 from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind, SideEffectLedger
 from ultron.registry.pointer import ActivePointerStore
 
@@ -76,7 +77,9 @@ class RollbackController:
         candidate_version: int | None = None,
         run_id: str = "pointer-transition",
         module_set_hash: str = "pointer-transition",
+        actor: str | None = None,
     ) -> None:
+        audit_actor = actor or DEFAULT_LOCAL_PRINCIPAL.subject
         state = _PointerRollbackState(
             key=key,
             prior_version=prior_version,
@@ -91,7 +94,8 @@ class RollbackController:
                 module_set_hash=module_set_hash,
                 canary_id=canary_id,
                 kind=SideEffectKind.POINTER_TRANSITION,
-                payload=state.to_ledger_payload(),
+                payload={**state.to_ledger_payload(), "actor": audit_actor},
+                actor=audit_actor,
             )
         )
 
