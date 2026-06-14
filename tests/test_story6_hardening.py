@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -195,6 +196,8 @@ def test_action_success_responses_do_not_echo_payload_supplied_ids():
     benchmark_body = _dump(benchmark.json())
     assert raw_canary_id not in benchmark_body
     assert "ghp_CANARYStory6SECRETtoken1234567890" not in benchmark_body
+    assert benchmark.json()["canary_id"] == hashlib.sha256(raw_canary_id.encode()).hexdigest()[:12]
+    assert not benchmark.json()["canary_id"].startswith("ghp_")
 
 
 def test_live_unavailable_503_bodies_are_generic():
@@ -261,7 +264,7 @@ def test_permission_request_reason_redacted_from_ledger_safety_surface():
     combined = _dump(surfaces)
     for raw in [sentinel, secret, reason, "story6-permission@example.com", "sk-permissionSECRETtoken1234567890"]:
         assert raw not in combined
-    assert short_id in combined
+    assert short_id == surfaces["/api/ledger"]["safety"]["pending_permission_expansions"][0]["request_id"]
     assert "pending_human_approval" in combined
     assert "reason_summary" in combined
     assert "tool_summary" in combined
@@ -280,6 +283,7 @@ def test_action_responses_are_status_and_short_ids_only():
     benchmark = _action(client, csrf, "RUN_BENCHMARK", {"candidate_hash": candidate_hash, "canary_id": canary_id}, engine.current_pointer_version())
     assert benchmark.status_code == 200, benchmark.text
     assert set(benchmark.json()) == {"ok", "candidate_hash", "canary_id", "status"}
+    assert benchmark.json()["canary_id"] == hashlib.sha256(canary_id.encode()).hexdigest()[:12]
 
     approve = _action(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": candidate_hash}, engine.current_pointer_version())
     assert approve.status_code == 200, approve.text
@@ -288,6 +292,7 @@ def test_action_responses_are_status_and_short_ids_only():
     rollback = _action(client, csrf, "ROLLBACK_CANARY", {"canary_id": canary_id}, engine.current_pointer_version())
     assert rollback.status_code == 200, rollback.text
     assert set(rollback.json()) == {"ok", "canary_id", "status"}
+    assert rollback.json()["canary_id"] == hashlib.sha256(canary_id.encode()).hexdigest()[:12]
 
     engine.registry.set_lifecycle(candidate_hash, ModuleLifecycle.PRUNED)
     restore = _action(client, csrf, "RESTORE_MODULE", {"module_hash": candidate_hash}, engine.current_pointer_version())

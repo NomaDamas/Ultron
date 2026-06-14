@@ -1,3 +1,4 @@
+import hashlib
 try:
     from fastapi.testclient import TestClient
 except ModuleNotFoundError:  # pragma: no cover
@@ -226,7 +227,7 @@ def test_permission_expansion_is_recorded_pending_not_applied():
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "pending_human_approval"
-    assert engine.pending_permission_expansions[-1]["request_id"].startswith(body["request_id"])
+    assert body["request_id"] == hashlib.sha256(engine.pending_permission_expansions[-1]["request_id"].encode()).hexdigest()[:12]
 
 
 def test_raw_unknown_ui_panel_injection_attempt_rejected():

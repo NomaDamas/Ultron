@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -77,7 +78,7 @@ def test_get_personalization_read_only_redacted_and_csp():
     assert trail["aggregates"]["signal_counts"]["runs"] >= 1
     assert "module_usage" in trail["aggregates"]
     assert "evidence_labels" in trail["aggregates"]
-    assert trail["last_proposal"]["candidate_short_hash"] == before[3][:12]
+    assert trail["last_proposal"]["candidate_short_hash"] == hashlib.sha256(before[3].encode()).hexdigest()[:12]
     assert trail["last_proposal"]["rationale"]
     assert trail["approval_state"] in {"pending-approval", "canary"}
     dumped = json.dumps(payload)
@@ -245,7 +246,7 @@ def test_restore_module_in_memory_records_prune_and_restore_actor_ledgers():
     response = _action(client, csrf, "RESTORE_MODULE", {"module_hash": target}, pointer_version)
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"ok": True, "module_hash": target[:12], "restored": True, "status": "restore_complete"}
+    assert response.json() == {"ok": True, "module_hash": hashlib.sha256(target.encode()).hexdigest()[:12], "restored": True, "status": "restore_complete"}
     entries = [entry for entry in engine._ledger_entries() if entry.kind is SideEffectKind.POINTER_TRANSITION and entry.module_hash == target]
     assert [entry.payload["action"] for entry in entries[-1:]] == ["restore"]
     assert all(entry.actor == "local-operator" for entry in entries[-1:])

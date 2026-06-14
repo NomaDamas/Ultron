@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 import secrets
@@ -297,7 +298,7 @@ def _jsonable(value: Any) -> Any:
 
 
 def _short_hash(value: str | None) -> str | None:
-    return value[:12] if value else None
+    return hashlib.sha256(value.encode()).hexdigest()[:12] if value else None
 
 
 if __name__ == "__main__":

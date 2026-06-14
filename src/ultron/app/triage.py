@@ -1237,7 +1237,7 @@ class TriageApp:
 
 
 def _short_hash(value: str | None) -> str | None:
-    return value[:12] if value else None
+    return hashlib.sha256(value.encode()).hexdigest()[:12] if value else None
 
 def _stable_hash(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
