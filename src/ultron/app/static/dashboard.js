@@ -22,7 +22,7 @@ function createShell() {
   header.append(brand, nav);
 
   const grid = el('main', 'dashboard-grid');
-  for (const [id, title] of [['ecology', 'Evolution ecology'], ['runs', 'Runs & evidence'], ['safety', 'Safety / approvals'], ['metrics', 'Metrics']]) {
+  for (const [id, title] of [['ecology', 'Evolution ecology'], ['runs', 'Runs & evidence'], ['personalization', 'Personalization / Self-evolution'], ['safety', 'Safety / approvals'], ['metrics', 'Metrics']]) {
     const section = el('section', 'panel');
     section.id = id;
     section.append(el('h2', null, title), el('div', 'panel-body', 'Loading…'));
@@ -39,15 +39,17 @@ async function getJson(url) {
 }
 
 async function refreshAll() {
-  const [ecology, runs, ledger, metrics] = await Promise.all([
+  const [ecology, runs, ledger, personalization, metrics] = await Promise.all([
     getJson('/api/ecology'),
     getJson('/api/runs'),
     getJson('/api/ledger'),
+    getJson('/api/personalization'),
     getJson('/api/metrics')
   ]);
   state.activePointerVersion = ecology.active_pointer_version;
   renderEcology(ecology);
   renderRuns(runs, ledger);
+  renderPersonalization(personalization);
   renderSafety(ledger.safety || {});
   renderMetrics(metrics);
 }
@@ -120,6 +122,50 @@ function renderSafety(safety) {
   controls.append(el('h3', null, 'Gated controls'));
   controls.append(el('p', null, 'Approve, rollback, restore, and benchmark mutations remain POST /api/action gated by CSRF, session scope, pointer version, and evidence policy.'));
   parent.append(requests, controls);
+}
+
+function renderPersonalization(data) {
+  const parent = body('personalization');
+  const summary = data.summary || {};
+  const trail = data.causal_trail || {};
+  const aggregates = trail.aggregates || {};
+  parent.append(el('p', 'summary', `Redacted summary ${shortHash(summary.summary_hash || aggregates.summary_hash)} · ${trail.approval_state || 'none'}`));
+
+  const counts = el('section', 'subpanel');
+  counts.append(el('h3', null, 'Usage counts'));
+  const countGrid = el('div', 'metrics-grid');
+  const signalCounts = aggregates.signal_counts || {};
+  for (const key of ['runs', 'feedback', 'acceptances', 'corrections']) {
+    const card = el('article', 'metric-card');
+    card.append(el('span', 'metric-value', signalCounts[key] ?? 0), el('span', 'metric-label', key));
+    countGrid.append(card);
+  }
+  counts.append(countGrid);
+
+  const evidence = el('section', 'subpanel');
+  evidence.append(el('h3', null, 'Evidence labels'));
+  const labels = el('ul', 'lineage-list');
+  for (const label of aggregates.evidence_labels || []) labels.append(el('li', null, label));
+  if (!aggregates.evidence_labels || aggregates.evidence_labels.length === 0) labels.append(el('li', null, 'No evidence labels yet.'));
+  evidence.append(labels);
+
+  const usage = el('section', 'subpanel');
+  usage.append(el('h3', null, 'Module usage'));
+  const usageList = el('div', 'table-list');
+  for (const [moduleId, count] of Object.entries(aggregates.module_usage || {})) usageList.append(row(['module', moduleId, count]));
+  if (!aggregates.module_usage || Object.keys(aggregates.module_usage).length === 0) usageList.append(el('p', 'empty', 'No module usage yet.'));
+  usage.append(usageList);
+
+  const proposal = el('section', 'subpanel');
+  proposal.append(el('h3', null, 'Last summary-derived proposal'));
+  const last = trail.last_proposal;
+  if (last) {
+    proposal.append(row(['proposal', last.primitive || '—', last.rationale || '—', last.candidate_short_hash || '—', last.lifecycle || '—', last.promotable ? 'promotable' : 'pending']));
+  } else {
+    proposal.append(el('p', 'empty', 'No stored personalization proposal.'));
+  }
+
+  parent.append(counts, evidence, usage, proposal);
 }
 
 function renderMetrics(metrics) {

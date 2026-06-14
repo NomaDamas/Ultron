@@ -122,6 +122,11 @@ def create_app() -> FastAPI:
         response.headers["Content-Security-Policy"] = CSP
         return {"entries": engine.recent_ledger(limit), "safety": engine.safety_status()}
 
+    @app.get("/api/personalization")
+    def personalization(response: Response) -> dict[str, Any]:
+        response.headers["Content-Security-Policy"] = CSP
+        return engine.personalization_observability(DEFAULT_SCOPE, DEFAULT_WORKFLOW)
+
     @app.post("/api/action")
     def action(
         cmd: ActionCommand,
@@ -134,19 +139,16 @@ def create_app() -> FastAPI:
         authed = principal is not None
         csrf_ok = authed and cmd.csrf_token is not None and csrf_tokens.get(ultron_session or "") == cmd.csrf_token and x_csrf_token == cmd.csrf_token
         required_scope = ACTION_SCOPES.get(cmd.type)
-        if required_scope is not None:
-            if principal is None:
-                engine.telemetry.increment("auth_failures", event="missing_or_expired_session")
-                raise HTTPException(status_code=401, detail="privileged action requires authenticated session")
-            if not principal.has_scope(required_scope):
-                engine.telemetry.increment("auth_failures", event="missing_scope", subject=principal.subject)
-                raise HTTPException(status_code=403, detail=f"privileged action requires scope {required_scope.value}")
-        if cmd.type in MUTATING_USER_ACTIONS:
+        is_mutating = cmd.type in MUTATING_USER_ACTIONS or required_scope is not None
+        if is_mutating:
             if principal is None:
                 engine.telemetry.increment("auth_failures", event="missing_or_expired_session")
                 raise HTTPException(status_code=401, detail="mutating action requires authenticated session")
+            if required_scope is not None and not principal.has_scope(required_scope):
+                engine.telemetry.increment("auth_failures", event="missing_scope", subject=principal.subject)
+                raise HTTPException(status_code=403, detail=f"privileged action requires scope {required_scope.value}")
             if not csrf_ok:
-                engine.telemetry.increment("auth_failures", event="invalid_csrf", subject=principal.subject)
+                engine.telemetry.increment("auth_failures", event="invalid_request", subject=principal.subject)
                 raise HTTPException(status_code=403, detail="mutating action requires a valid CSRF token")
         policy_ok = _policy_ok(engine, cmd)
         try:

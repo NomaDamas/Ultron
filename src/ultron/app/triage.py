@@ -500,6 +500,48 @@ class TriageApp:
         body["summary_hash"] = _canonical_sha256(body)
         return PersonalizationSummary.model_validate(body)
 
+    def personalization_observability(self, user_scope: str, workflow_fingerprint: str) -> dict[str, Any]:
+        summary = self.build_personalization_summary(user_scope, workflow_fingerprint)
+        proposal = None
+        candidate_hash = self.last_candidate_hash
+        if candidate_hash:
+            evaluated = self.evaluated_candidates.get(candidate_hash, {})
+            report = evaluated.get("report")
+            try:
+                entry = self.registry.get(candidate_hash)
+                lifecycle = entry.lifecycle.value.lower()
+                primitive = getattr(entry.module, "variation_primitive_id", None) or (getattr(report, "primitive", None) if report is not None else None) or "unknown"
+            except KeyError:
+                lifecycle = "unknown"
+                primitive = getattr(report, "primitive", "unknown") if report is not None else "unknown"
+            proposal = {
+                "primitive": str(getattr(primitive, "value", primitive)),
+                "rationale": f"Last stored candidate derived from redacted summary {summary.summary_hash[:19]}.",
+                "candidate_short_hash": _short_hash(candidate_hash),
+                "lifecycle": lifecycle,
+                "canary_id": self.last_canary_id if self.last_canary_id and self.canary_active(self.last_canary_id) else None,
+                "promotable": self.has_promotable_evidence(candidate_hash),
+            }
+        return {
+            "summary": summary.model_dump(mode="json"),
+            "causal_trail": {
+                "aggregates": {
+                    "signal_counts": {
+                        "runs": summary.n_runs,
+                        "feedback": summary.n_feedback,
+                        "acceptances": summary.explicit_user_acceptances,
+                        "corrections": summary.explicit_user_corrections,
+                    },
+                    "summary_hash": summary.summary_hash,
+                    "evidence_labels": [label.value for label in summary.dominant_evidence_labels],
+                    "module_usage": dict(summary.module_usage),
+                    "recent_primitive_hints": list(summary.recent_primitive_hints),
+                },
+                "last_proposal": proposal,
+                "approval_state": "canary" if proposal and proposal.get("canary_id") else "pending-approval" if proposal else "none",
+            },
+        }
+
     def personalize(self, user_scope: str, workflow_fingerprint: str) -> dict[str, Any] | PendingVariationApproval:
         summary = self.build_personalization_summary(user_scope, workflow_fingerprint)
         _, active = self.pointer_store.get((user_scope, workflow_fingerprint))
@@ -694,6 +736,7 @@ class TriageApp:
         self.evaluated_candidates[candidate_hash] = {"report": report, "outcome": decision["outcome"], "canary_id": decision["canary_id"]}
         self._update_fitness_for_modules([candidate_hash], time.time(), benchmark_report=report, feedback_summary=self.feedback_summary(candidate_hash))
         self.telemetry.increment("benchmarks_run", event="benchmark_run", subject=actor)
+        self._append_ledger("benchmark", candidate_hash, candidate_hash, canary_id or self.last_canary_id, SideEffectKind.TELEMETRY, {"action": "RUN_BENCHMARK", "candidate_hash": candidate_hash}, actor=actor)
         return decision
 
     def _benchmark_request(self, module_hashes: list[str], task: Any, side: str) -> AdapterRunRequest:
@@ -756,6 +799,7 @@ class TriageApp:
             retained = self.evolution_loop.retain(candidate_hash, outcome, DEFAULT_SCOPE, DEFAULT_WORKFLOW, expected_pointer_version)
         if retained:
             self.telemetry.increment("promotions", event="promotion", subject=actor)
+            self._append_ledger("promotion", candidate_hash, candidate_hash, stored.get("canary_id"), SideEffectKind.POINTER_TRANSITION, {"action": "APPROVE_PROMOTION", "candidate_hash": candidate_hash, "actor": actor}, actor=actor)
         return {"report": report, "outcome": outcome, "promoted": retained, "canary_id": stored.get("canary_id")}
 
     def synthesize_candidate(self, request_text: str, parent_hash: str | None = None) -> dict[str, Any]:
@@ -926,6 +970,7 @@ class TriageApp:
         request = {"request_id": uuid.uuid4().hex, "status": "pending_human_approval", "payload": dict(payload)}
         self.pending_permission_expansions.append(request)
         self.telemetry.increment("permission_requests", event="permission_request", subject=actor)
+        self._append_ledger(request["request_id"], "permission-expansion", None, None, SideEffectKind.TELEMETRY, {"action": "REQUEST_PERMISSION_EXPANSION", "request_id": request["request_id"]}, actor=actor)
         return request
 
     def feedback_summary(self, candidate_hash: str) -> FeedbackSummary:

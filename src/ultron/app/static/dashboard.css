@@ -53,7 +53,7 @@ a { color: var(--accent); text-decoration: none; }
 .subpanel { display: grid; gap: 10px; padding: 13px; }
 .lineage-list { display: grid; gap: 6px; margin: 0; padding-left: 18px; color: var(--muted); }
 .table-list { display: grid; gap: 8px; }
-.data-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; padding: 10px; overflow-wrap: anywhere; }
+.data-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; padding: 10px; overflow-wrap: anywhere; }
 .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
 .metric-card { display: grid; gap: 5px; padding: 14px; }
 .metric-value { color: var(--accent); font-weight: 900; font-size: 1.55rem; }
