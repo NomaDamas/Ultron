@@ -120,12 +120,15 @@ function appendAgentTurn(data) {
   const result = data.result || {};
   const turn = el('article', 'turn agent-turn');
   const manifest = result.run_manifest || {};
-  state.lastRunId = manifest.run_id || state.lastRunId;
+  state.lastRunId = data.envelope?.run_id || manifest.run_id || state.lastRunId;
   turn.append(el('p', 'bubble agent-bubble', 'I ran the request and generated an inline control surface for the resulting plan, risk, tests, and evidence.'));
   const cards = el('div', 'cards');
-  renderRunOutput(cards, result.run_result || result.adapter_result?.output || {});
-  renderUiSpec(cards, result.ui_spec || data.ui_spec);
-  if (data.candidate || data.canary_id) cards.append(renderHarnessShaping(data));
+  if (data.envelope) renderInlineEnvelope(cards, data.envelope, data);
+  else {
+    renderRunOutput(cards, result.run_result || result.adapter_result?.output || {});
+    renderUiSpec(cards, result.ui_spec || data.ui_spec);
+    if (data.candidate || data.canary_id) cards.append(renderHarnessShaping(data));
+  }
   turn.append(cards);
   appendTurn(turn);
 }
@@ -139,13 +142,108 @@ function renderRunOutput(parent, output) {
 
 function renderUiSpec(parent, spec) {
   const components = Array.isArray(spec?.components) ? spec.components : [];
-  for (const component of components) {
-    const props = component && typeof component.props === 'object' && component.props !== null ? component.props : {};
-    const built = card(String(component.type || 'PANEL').replaceAll('_', ' '), props.summary || props.title || props);
-    built.classList.add('uispec-card');
-    applyAnimation(built, component.animation);
-    parent.append(built);
+  for (const component of components) parent.append(renderComponent(component, {}));
+}
+
+function renderInlineEnvelope(parent, envelope, data) {
+  const context = { envelope, data };
+  const components = Array.isArray(envelope?.components) ? envelope.components : [];
+  for (const component of components) parent.append(renderComponent(component, context));
+}
+
+function renderComponent(component, context) {
+  const type = String(component?.type || 'UNKNOWN_COMPONENT');
+  const props = component && typeof component.props === 'object' && component.props !== null ? component.props : {};
+  const renderer = COMPONENT_RENDERERS[type] || renderUnknownComponent;
+  const node = renderer(props, component || {}, context || {});
+  applyAnimation(node, component?.animation);
+  return node;
+}
+
+const COMPONENT_RENDERERS = {
+  RUN_SUMMARY_CARD: renderRunSummaryCard,
+  TOOL_RESULT_CARD: renderToolResultCard,
+  HARNESS_EVOLUTION_CARD: renderHarnessEvolutionCard,
+  EVIDENCE_STATUS_CARD: renderEvidenceStatusCard,
+  PERSONALIZATION_SIGNAL_CARD: renderPersonalizationSignalCard,
+  SAFETY_STATUS_CARD: renderSafetyStatusCard,
+  ORB_STATUS: renderOrbStatus,
+  TIMELINE_STEP: renderTimelineStep
+};
+
+function renderRunSummaryCard(props) {
+  const section = card('Run summary', { run_id: props.run_id, workflow: props.workflow, manifest_hash: props.manifest_hash, trajectory_id: props.trajectory_id, status: props.status });
+  appendList(section, props.summary_lines);
+  return section;
+}
+
+function renderToolResultCard(props) {
+  const section = card(`Tool: ${props.tool || 'result'}`, { status: props.status, output_redacted: props.output_redacted, secrets_redacted: props.secrets_redacted });
+  appendList(section, props.output_summary);
+  return section;
+}
+
+function renderHarnessEvolutionCard(props, _component, context) {
+  const section = card('Harness evolution', props);
+  const controls = el('div', 'feedback-controls');
+  const up = actionButton('Keep shaping this way', 'GIVE_FEEDBACK', { run_id: context.envelope?.run_id || state.lastRunId || 'run', rating: 1, comment: 'preserve this harness direction' });
+  const down = actionButton('Less like this', 'GIVE_FEEDBACK', { run_id: context.envelope?.run_id || state.lastRunId || 'run', rating: -1, comment: 'avoid this harness direction' });
+  controls.append(up, down);
+  section.append(controls);
+  return section;
+}
+
+function renderEvidenceStatusCard(props, _component, context) {
+  const section = card('Evidence status', props);
+  const controls = el('div', 'feedback-controls');
+  controls.append(actionButton('Run benchmark', 'RUN_BENCHMARK', { candidate_hash: context.envelope?.candidate_hash, canary_id: context.envelope?.canary_id }));
+  section.append(controls);
+  return section;
+}
+
+function renderPersonalizationSignalCard(props) {
+  return card('Personalization signal', props);
+}
+
+function renderSafetyStatusCard(props, _component, context) {
+  const section = card('Safety status', props);
+  const controls = el('div', 'feedback-controls');
+  const actions = Array.isArray(props.gated_actions) ? props.gated_actions : [];
+  for (const type of actions) {
+    if (type === 'APPROVE_PROMOTION') controls.append(actionButton('Approve promotion', type, { candidate_hash: context.envelope?.candidate_hash }));
+    if (type === 'ROLLBACK_CANARY') controls.append(actionButton('Rollback canary', type, { canary_id: context.envelope?.canary_id }));
   }
+  if (controls.childNodes.length) section.append(controls);
+  return section;
+}
+
+function renderOrbStatus(props) {
+  return card('Orb status', { state: props.state, status_text: props.status_text });
+}
+
+function renderTimelineStep(props) {
+  return card('Timeline step', props);
+}
+
+function renderUnknownComponent(props, component) {
+  return card(String(component?.type || 'Unknown component').replaceAll('_', ' '), props);
+}
+
+function appendList(parent, lines) {
+  if (!Array.isArray(lines) || !lines.length) return;
+  const list = el('ul', 'summary-list');
+  for (const line of lines) list.append(el('li', null, line));
+  parent.append(list);
+}
+
+function actionButton(label, type, payload) {
+  const button = el('button', 'feedback-button', label);
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    const data = await sendAction(type, payload || {});
+    if (data?.ok) appendNotice(`${humanize(type)} accepted.`);
+  });
+  return button;
 }
 
 function applyAnimation(node, animation) {

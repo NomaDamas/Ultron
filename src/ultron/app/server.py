@@ -161,8 +161,8 @@ def create_app() -> FastAPI:
                 canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text)
             except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
-            candidate_hash = canary["candidate"].content_hash or ""
-            return _jsonable({"ok": True, "result": result, "candidate": canary["candidate"], "canary_id": canary["canary_id"]})
+            envelope = engine.build_inline_genui_envelope(result, canary)
+            return _jsonable({"ok": True, "result": result, "candidate": canary["candidate"], "canary_id": canary["canary_id"], "envelope": envelope})
         if cmd.type is ActionType.RUN_BENCHMARK:
             candidate_hash = str(cmd.payload.get("candidate_hash") or engine.last_candidate_hash or "")
             if not candidate_hash:

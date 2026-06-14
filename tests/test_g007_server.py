@@ -136,6 +136,11 @@ def test_submit_request_benchmark_then_approve_promotion_advances_pointer():
     assert body["result"]["run_manifest"]["signature"]
     candidate_hash = body["candidate"]["content_hash"]
     assert "evaluation" not in body
+    envelope = body["envelope"]
+    assert envelope["manifest_signature_ok"] is True
+    assert envelope["provenance"]["run"] == envelope["run_id"]
+    assert envelope["components"]
+    assert envelope["redaction"]["request_text"] is True
     benchmarked = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": candidate_hash, "canary_id": body["canary_id"]})
     assert benchmarked.status_code == 200
     assert benchmarked.json()["evaluation"]["report"]["promotable"] is True

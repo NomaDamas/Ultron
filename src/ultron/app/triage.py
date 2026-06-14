@@ -39,7 +39,7 @@ from ultron.persistence.db import Database
 from ultron.persistence.sqlite_stores import SqliteActivePointerStore, SqliteBlobStore, SqliteEvaluatedCandidateStore, SqliteFeedbackChannel, SqliteModuleRegistry, SqliteSideEffectLedger
 from ultron.run.signer import EnvKeyProvider, FixtureKeyProvider, ManifestSigner
 from ultron.ui.generator import DeterministicFakeUiSpecGenerator, LiveModelUiSpecGenerator, UiGenContext, UiSpecGenerator, validate_generated_uispec
-from ultron.ui.runtime import ComponentType, UiSpec
+from ultron.ui.runtime import ActionType, AnimationHint, ComponentType, HarnessLifecycle, InlineGenUiEnvelope, OrbState, Region, RollbackState, RunStatus, TimelineStatus, ToolStatus, UiComponent, UiSpec
 
 
 DEFAULT_SCOPE = "default-user"
@@ -227,6 +227,139 @@ class TriageApp:
         self.telemetry.increment("runs_started", event="run_started", subject=actor)
         self.last_ui_spec = ui_spec
         return {"run_result": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec}
+
+    def build_inline_genui_envelope(self, run: dict[str, Any], canary: dict[str, Any]) -> InlineGenUiEnvelope:
+        raw_manifest = run["run_manifest"]
+        raw_adapter_result = run["adapter_result"]
+        run_manifest = raw_manifest if hasattr(raw_manifest, "verify") else RunManifest.model_validate(raw_manifest)
+        adapter_result = raw_adapter_result if hasattr(raw_adapter_result, "output") and hasattr(raw_adapter_result, "trajectory_id") else AdapterRunResult.model_validate(raw_adapter_result)
+        output = adapter_result.output
+        ui_spec = UiSpec.model_validate(run.get("ui_spec") or self.last_ui_spec or self.current_uispec())
+        candidate = canary["candidate"]
+        proposal = canary.get("proposal")
+        candidate_hash = candidate.content_hash or canary.get("candidate_hash") or "candidate"
+        canary_id = str(canary.get("canary_id") or "") or None
+        candidate_eval = self.evaluated_candidates.get(candidate_hash, {})
+        report = candidate_eval.get("report")
+        manifest_hash = _short_hash(run_manifest.active_module_set_hash) or "manifest"
+        trajectory_id = str(run_manifest.model_snapshot.get("trajectory_id") or adapter_result.trajectory_id or "trajectory")
+        summary_lines = [_bounded_summary_line(output.get("plan")), _bounded_summary_line(output.get("risk")), _bounded_summary_line(output.get("tests"))]
+        pending_permissions = len(self.pending_permission_expansions)
+        rollback_state = RollbackState.READY if canary_id and self.canary_active(canary_id) else RollbackState.UNAVAILABLE
+        no_poisoning_ok = _canary_no_poisoning_ok(self, canary_id)
+        gated_actions = [ActionType.RUN_BENCHMARK.value, ActionType.GIVE_FEEDBACK.value]
+        if self.has_promotable_evidence(candidate_hash):
+            gated_actions.append(ActionType.APPROVE_PROMOTION.value)
+        if rollback_state is RollbackState.READY:
+            gated_actions.append(ActionType.ROLLBACK_CANARY.value)
+        components = [
+            UiComponent(
+                type=ComponentType.ORB_STATUS,
+                region=Region.MAIN,
+                priority=0,
+                props={"state": OrbState.IDLE, "status_text": "Run completed and inline GenUI envelope validated."},
+                animation=AnimationHint(kind="pulse_glow", duration_ms=300, delay_ms=0, reduced_motion_fallback="none"),
+            ),
+            UiComponent(
+                type=ComponentType.RUN_SUMMARY_CARD,
+                region=Region.MAIN,
+                priority=10,
+                props={
+                    "run_id": run_manifest.run_id,
+                    "workflow": run_manifest.workflow_fingerprint,
+                    "manifest_hash": manifest_hash,
+                    "trajectory_id": trajectory_id,
+                    "status": RunStatus.SUCCEEDED,
+                    "summary_lines": summary_lines,
+                },
+                animation=AnimationHint(kind="fade_in", duration_ms=240, delay_ms=0, reduced_motion_fallback="none"),
+            ),
+        ]
+        for offset, (tool, text) in enumerate((("plan", output.get("plan")), ("risk", output.get("risk")), ("tests", output.get("tests"))), start=1):
+            components.append(
+                UiComponent(
+                    type=ComponentType.TOOL_RESULT_CARD,
+                    region=Region.MAIN,
+                    priority=10 + offset,
+                    props={
+                        "tool": tool,
+                        "status": ToolStatus.SUCCEEDED,
+                        "output_summary": [_bounded_summary_line(text)],
+                        "output_redacted": True,
+                        "secrets_redacted": True,
+                    },
+                    animation=AnimationHint(kind="slide_up", duration_ms=280, delay_ms=25 * offset, reduced_motion_fallback="fade_in"),
+                )
+            )
+        components.extend(
+            [
+                UiComponent(
+                    type=ComponentType.HARNESS_EVOLUTION_CARD,
+                    region=Region.MAIN,
+                    priority=20,
+                    props={
+                        "parent_hash": _short_hash(getattr(proposal, "parent_hash", None)) or _short_hash(candidate.parent_id) or "parent",
+                        "candidate_hash": _short_hash(candidate_hash) or "candidate",
+                        "primitive": str(getattr(getattr(proposal, "primitive", "PROMPT_SLOT_EDIT"), "value", getattr(proposal, "primitive", "PROMPT_SLOT_EDIT"))),
+                        "lifecycle": HarnessLifecycle.CANDIDATE,
+                        "rationale": _bounded_summary_line(getattr(proposal, "rationale", "Candidate harness canary created from trusted server-side run output."), max_length=240),
+                        "canary_id": canary_id,
+                    },
+                    animation=AnimationHint(kind="slide_up", duration_ms=280, delay_ms=100, reduced_motion_fallback="fade_in"),
+                ),
+                UiComponent(
+                    type=ComponentType.EVIDENCE_STATUS_CARD,
+                    region=Region.MAIN,
+                    priority=30,
+                    props={
+                        "provenance": _bounded_summary_line(getattr(report, "provenance", None) or "pending benchmark", max_length=120),
+                        "promotable": self.has_promotable_evidence(candidate_hash),
+                        "evidence_label": _bounded_summary_line(getattr(getattr(report, "evidence_label", None), "value", getattr(report, "evidence_label", "pending")), max_length=80),
+                        "paired_tasks": int(getattr(report, "paired_tasks", 0) or 0),
+                    },
+                    animation=AnimationHint(kind="fade_in", duration_ms=240, delay_ms=125, reduced_motion_fallback="none"),
+                ),
+                UiComponent(
+                    type=ComponentType.SAFETY_STATUS_CARD,
+                    region=Region.ACTIONS,
+                    priority=40,
+                    props={
+                        "pending_permissions": pending_permissions,
+                        "rollback_state": rollback_state,
+                        "no_poisoning_ok": no_poisoning_ok,
+                        "gated_actions": gated_actions,
+                    },
+                    animation=AnimationHint(kind="fade_in", duration_ms=240, delay_ms=150, reduced_motion_fallback="none"),
+                ),
+                UiComponent(
+                    type=ComponentType.TIMELINE_STEP,
+                    region=Region.MAIN,
+                    priority=50,
+                    props={"label": "Feedback", "status": TimelineStatus.PENDING, "detail": "Use feedback controls to tune future harness direction."},
+                    animation=AnimationHint(kind="fade_in", duration_ms=240, delay_ms=175, reduced_motion_fallback="none"),
+                ),
+            ]
+        )
+        envelope = InlineGenUiEnvelope(
+            envelope_id=f"inline-{run_manifest.run_id[:24]}",
+            run_id=run_manifest.run_id,
+            run_manifest_hash=run_manifest.active_module_set_hash,
+            manifest_signature_ok=run_manifest.verify(signer=self.manifest_signer),
+            active_module_set_hash=run_manifest.active_module_set_hash,
+            candidate_hash=candidate_hash,
+            canary_id=canary_id,
+            ui_spec_hash=ui_spec.spec_hash,
+            components=components,
+            provenance={
+                "run": run_manifest.run_id,
+                "manifest": run_manifest.active_module_set_hash,
+                "candidate": candidate_hash,
+                "ui": ui_spec.spec_hash or "pending",
+            },
+            redaction={"request_text": True, "adapter_blob": True, "secrets": True},
+            created_at=time.time(),
+        )
+        return envelope.finalized(self.ui_registry)
 
     def submit_feedback(self, run_id: str, rating: int = 1, comment: str = "") -> FeedbackEvent:
         payload = canonical_rating_payload(rating, comment)
@@ -923,3 +1056,23 @@ def _build_durable_triage_app(db_path: str, *, signer: ManifestSigner) -> Triage
     app.evaluated_candidates = SqliteEvaluatedCandidateStore(db)
     app.manifest_signer = signer
     return app
+
+
+def _bounded_summary_line(value: Any, max_length: int = 180) -> str:
+    if isinstance(value, list):
+        text = "; ".join(str(item) for item in value[:3])
+    elif isinstance(value, dict):
+        text = "; ".join(f"{key}: {value[key]}" for key in sorted(value)[:3])
+    else:
+        text = str(value or "No summary available")
+    text = " ".join(text.split())
+    text = text.replace("<", "‹").replace(">", "›")
+    if not text:
+        text = "No summary available"
+    return text[: max_length - 1] + "…" if len(text) > max_length else text
+
+
+def _canary_no_poisoning_ok(app: TriageApp, canary_id: str | None) -> bool:
+    if not canary_id:
+        return True
+    return all(not app.canary_store.read_namespace(canary_id, namespace) for namespace in ("skills", "ui_cache", "pointer"))

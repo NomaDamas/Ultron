@@ -21,6 +21,10 @@ def test_full_triage_loop_seed_run_canary_promote_rollback_atrophy_restore():
     candidate_hash = canary["candidate"].content_hash
     assert app.canary_store.read_namespace(canary["canary_id"], "memory")
     assert app.registry.get(candidate_hash).lifecycle == ModuleLifecycle.CANDIDATE
+    envelope = app.build_inline_genui_envelope(run, canary)
+    assert envelope.manifest_signature_ok is True
+    assert envelope.candidate_hash == candidate_hash
+    assert envelope.components
     assert canary["candidate"].prompt_pack_hash is not None
     prompt_blob = app.blob_store.get(BlobKind.PROMPT_PACK, canary["candidate"].prompt_pack_hash)
     assert isinstance(prompt_blob, PromptPack)
