@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 from ultron.app.server import create_app
 from ultron.evolution.variation import VariationPrimitive
 from ultron.ledger.side_effect_ledger import SideEffectKind
+from ultron.evolution.loop import StabilityControls
+from ultron.module.model import FitnessMetadata, PromotionState
 from ultron.registry.store import ModuleLifecycle
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -211,3 +213,53 @@ def test_atrophy_and_restore_in_memory_records_prune_and_restore_actor_ledgers()
     assert [entry.payload["action"] for entry in entries[-2:]] == ["prune", "restore"]
     assert all(entry.actor == "local-operator" for entry in entries[-2:])
     assert all(entry.payload["actor"] == "local-operator" for entry in entries[-2:])
+
+
+def test_run_atrophy_scan_in_memory_defaults_actor_on_prune_ledger():
+    client = _client()
+    engine = client.app.state.triage
+    engine.evolution_loop.controls = StabilityControls(active_module_cap=4, diversity_floor=1, promotion_cooldown_s=0, prune_cooldown_s=0)
+    engine.seed_baseline()
+    result = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "story5 atrophy default actor"})
+    target = result["candidate"].content_hash
+    candidate = engine.registry.get(target).module.model_copy(
+        update={"fitness": FitnessMetadata(primary_metric=-1.0, usage_count=0, last_used_at=1.0, decay_score=1.0, promotion_state=PromotionState.CANDIDATE)},
+        deep=True,
+    )
+    engine._store_fitness_update(target, candidate)
+    engine.registry.set_lifecycle(target, ModuleLifecycle.SURVIVOR)
+    version, active = engine.pointer_store.get(engine.pointer_key)
+    engine.pointer_store.swap(engine.pointer_key, version, active + [target])
+
+    scan = engine.run_atrophy_scan(1000.0)
+
+    assert scan["pruned"] == [target]
+    entries = [entry for entry in engine._ledger_entries() if entry.kind is SideEffectKind.POINTER_TRANSITION and entry.module_hash == target and entry.payload["action"] == "atrophy_prune"]
+    assert entries
+    assert entries[-1].actor == "local-operator"
+    assert entries[-1].payload["actor"] == "local-operator"
+
+
+def test_run_atrophy_scan_in_memory_records_explicit_actor_on_prune_ledger():
+    client = _client()
+    engine = client.app.state.triage
+    engine.evolution_loop.controls = StabilityControls(active_module_cap=4, diversity_floor=1, promotion_cooldown_s=0, prune_cooldown_s=0)
+    engine.seed_baseline()
+    result = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "story5 atrophy explicit actor"})
+    target = result["candidate"].content_hash
+    candidate = engine.registry.get(target).module.model_copy(
+        update={"fitness": FitnessMetadata(primary_metric=-1.0, usage_count=0, last_used_at=1.0, decay_score=1.0, promotion_state=PromotionState.CANDIDATE)},
+        deep=True,
+    )
+    engine._store_fitness_update(target, candidate)
+    engine.registry.set_lifecycle(target, ModuleLifecycle.SURVIVOR)
+    version, active = engine.pointer_store.get(engine.pointer_key)
+    engine.pointer_store.swap(engine.pointer_key, version, active + [target])
+
+    scan = engine.run_atrophy_scan(1000.0, actor="story5-operator")
+
+    assert scan["pruned"] == [target]
+    entries = [entry for entry in engine._ledger_entries() if entry.kind is SideEffectKind.POINTER_TRANSITION and entry.module_hash == target and entry.payload["action"] == "atrophy_prune"]
+    assert entries
+    assert entries[-1].actor == "story5-operator"
+    assert entries[-1].payload["actor"] == "story5-operator"

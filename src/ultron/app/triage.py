@@ -981,6 +981,7 @@ class TriageApp:
         self.seed_baseline()
         version, active = self.pointer_store.get(self.pointer_key)
         eligible = self.evolution_loop.atrophy_scan(active, now)
+        audit_actor = actor or DEFAULT_LOCAL_PRINCIPAL.subject
         pruned: list[str] = []
         for module_hash in eligible:
             current_version, current_active = self.pointer_store.get(self.pointer_key)
@@ -996,7 +997,7 @@ class TriageApp:
                     current_version,
                     new_active,
                     f"atrophy-{int(now)}",
-                    actor or DEFAULT_LOCAL_PRINCIPAL.subject,
+                    audit_actor,
                     key=self.pointer_key,
                     is_critical_seed=module_hash in self.evolution_loop._critical_seeds,
                     approved=False,
@@ -1005,7 +1006,7 @@ class TriageApp:
                 )
                 pruned.append(module_hash)
             elif self.evolution_loop.prune(module_hash):
-                self._append_ledger(f"atrophy-{int(now)}", module_hash, module_hash, None, SideEffectKind.POINTER_TRANSITION, {"action": "atrophy_prune", "prior_version": current_version, "prior_hashes": current_active, "new_hashes": new_active}, actor=actor)
+                self._append_ledger(f"atrophy-{int(now)}", module_hash, module_hash, None, SideEffectKind.POINTER_TRANSITION, {"action": "atrophy_prune", "prior_version": current_version, "prior_hashes": current_active, "new_hashes": new_active, "actor": audit_actor}, actor=audit_actor)
                 pruned.append(module_hash)
         if pruned:
             self.telemetry.increment("prunes", amount=len(pruned), event="prune", subject=actor)
