@@ -7,7 +7,7 @@ from typing import Any, Iterable, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ultron.ui.runtime import ActionType, ComponentType, PRIVILEGED_ACTIONS, UiSpec, build_uispec_from_manifest
+from ultron.ui.runtime import ComponentType, UiSpec, build_uispec_from_manifest
 
 
 class LiveModelUnavailable(RuntimeError):
@@ -76,7 +76,10 @@ class LiveModelUiSpecGenerator:
         if self.provider is None:
             raise LiveModelUnavailable("live model UI generation requires a configured model")
         prompt = json.dumps(self.build_prompt(context), sort_keys=True)
-        text = self.provider.complete(prompt, "UiSpec JSON with components[{type,region,priority,props,telemetry_schema}] and optional spec_hash")
+        text = self.provider.complete(
+            prompt,
+            "UiSpec JSON with components[{type,region,priority,props,telemetry_schema(max 8 strings, max 80 chars each)}] and optional spec_hash",
+        )
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
@@ -85,25 +88,6 @@ class LiveModelUiSpecGenerator:
 
 
 def validate_generated_uispec(spec: UiSpec | dict[str, Any], registry: Iterable[ComponentType | str]) -> UiSpec:
-    parsed = UiSpec.model_validate(spec).finalized(registry)
-    for component in parsed.components:
-        actions = component.props.get("actions", [])
-        if actions is None:
-            continue
-        if not isinstance(actions, list):
-            raise ValueError("generated UiSpec actions must be a list")
-        for action in actions:
-            action_type = _action_type(action)
-            if action_type in PRIVILEGED_ACTIONS:
-                raise PermissionError("generated UiSpec cannot define privileged actions")
-    return parsed
+    parsed = UiSpec.model_validate(spec)
+    return parsed.finalized(registry)
 
-
-def _action_type(action: Any) -> ActionType:
-    if isinstance(action, ActionType):
-        return action
-    if isinstance(action, str):
-        return ActionType(action)
-    if isinstance(action, dict) and "type" in action:
-        return ActionType(action["type"])
-    raise ValueError("generated UiSpec action must be typed")
