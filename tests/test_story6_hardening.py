@@ -128,6 +128,31 @@ def test_no_raw_request_feedback_or_secrets_across_envelope_and_read_surfaces():
         assert secret not in combined
     assert "[redacted]" in combined or "redacted" in combined.lower()
 
+def test_malformed_action_validation_does_not_echo_secret_bearing_input():
+    client = _client()
+    csrf = _csrf(client)
+    sentinel = "story6-malformed-validation-sentinel-1b7f3e2c"
+    gh_secret = "ghp_malformedStory6SECRETtoken1234567890"
+    sk_secret = "sk-malformedStory6SECRETtoken1234567890"
+    response = client.post(
+        "/api/action",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "type": "SUBMIT_REQUEST",
+            "payload": {"request_text": f"{sentinel} {gh_secret} {sk_secret}"},
+            "csrf_token": csrf,
+            "unexpected_extra_field": f"{sentinel} {gh_secret} {sk_secret}",
+        },
+    )
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert set(body) == {"detail"}
+    assert body["detail"]
+    assert all(set(error) == {"loc", "msg", "type"} for error in body["detail"])
+    combined = _dump(body)
+    for raw in [sentinel, gh_secret, sk_secret]:
+        assert raw not in combined
+
 
 def test_redaction_preserves_common_words_and_blocks_truncated_prefixes():
     from ultron.app.triage import _redact

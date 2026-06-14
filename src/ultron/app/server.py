@@ -48,7 +48,7 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Any, exc: RequestValidationError) -> JSONResponse:
-        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        return JSONResponse(status_code=422, content={"detail": _safe_validation_errors(exc)})
 
     @app.exception_handler(LiveHermesUnavailable)
     async def live_hermes_unavailable_handler(request: Any, exc: LiveHermesUnavailable) -> JSONResponse:
@@ -162,7 +162,7 @@ def create_app() -> FastAPI:
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (ValidationError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=_safe_validation_errors(exc)) from exc
         except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -192,8 +192,10 @@ def create_app() -> FastAPI:
                 evaluation = engine.benchmark_and_decide(candidate_hash, canary_id=str(cmd.payload.get("canary_id") or engine.last_canary_id or ""), actor=principal.subject if principal else None)
             except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
-            except (KeyError, PermissionError, ValueError) as exc:
+            except PermissionError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(status_code=403, detail=_safe_validation_errors(exc)) from exc
             return _jsonable({"ok": True, "candidate_hash": _short_hash(candidate_hash), "canary_id": str(cmd.payload.get("canary_id") or engine.last_canary_id or ""), "status": "benchmark_complete"})
         if cmd.type is ActionType.GIVE_FEEDBACK:
             event = engine.submit_feedback(str(cmd.payload.get("run_id", engine.last_manifest.run_id if engine.last_manifest else "run")), int(cmd.payload.get("rating", 1)), str(cmd.payload.get("comment", "")), actor=principal.subject if principal else None)
@@ -204,8 +206,10 @@ def create_app() -> FastAPI:
                 decision = engine.approve_promotion(candidate_hash, cmd.active_pointer_version or -1, actor=principal.subject if principal else None)
             except PolicyDenied as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
-            except (KeyError, PermissionError, ValueError) as exc:
+            except PermissionError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
+            except (KeyError, ValueError) as exc:
+                raise HTTPException(status_code=403, detail=_safe_validation_errors(exc)) from exc
             return _jsonable({"ok": True, "candidate_hash": _short_hash(candidate_hash), "promoted": bool(decision.get("promoted")), "active_pointer_version": engine.current_pointer_version(), "status": "promotion_decided"})
         if cmd.type is ActionType.ROLLBACK_CANARY:
             canary_id = str(cmd.payload.get("canary_id") or engine.last_canary_id or "")
@@ -241,6 +245,19 @@ def _policy_ok(engine: TriageApp, cmd: ActionCommand) -> bool:
     if cmd.type is ActionType.REQUEST_PERMISSION_EXPANSION:
         return True
     return True
+
+
+def _safe_validation_errors(exc: ValidationError | RequestValidationError | ValueError) -> list[dict[str, Any]] | str:
+    if isinstance(exc, (ValidationError, RequestValidationError)):
+        return [
+            {
+                "loc": list(error.get("loc", ())),
+                "msg": str(error.get("msg", "invalid action request")),
+                "type": str(error.get("type", "value_error")),
+            }
+            for error in exc.errors()
+        ]
+    return "invalid action request"
 
 
 def _jsonable(value: Any) -> Any:
