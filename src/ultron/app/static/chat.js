@@ -117,19 +117,13 @@ async function sendAction(type, payload) {
 }
 
 function appendAgentTurn(data) {
-  const result = data.result || {};
   const turn = el('article', 'turn agent-turn');
-  const manifest = result.run_manifest || {};
-  state.lastRunId = data.envelope?.run_id || manifest.run_id || state.lastRunId;
-  state.activePointerVersion = data.envelope?.provenance?.active_pointer_version ?? state.activePointerVersion;
+  state.lastRunId = data.envelope?.run_id || data.run_id || state.lastRunId;
+  state.activePointerVersion = data.envelope?.provenance?.active_pointer_version ?? data.active_pointer_version ?? state.activePointerVersion;
   turn.append(el('p', 'bubble agent-bubble', 'I ran the request and generated an inline control surface for the resulting plan, risk, tests, and evidence.'));
   const cards = el('div', 'cards');
   if (data.envelope) renderInlineEnvelope(cards, data.envelope, data);
-  else {
-    renderRunOutput(cards, result.run_result || result.adapter_result?.output || {});
-    renderUiSpec(cards, result.ui_spec || data.ui_spec);
-    if (data.candidate || data.canary_id) cards.append(renderHarnessShaping(data));
-  }
+  else cards.append(card('Action complete', { status: data.status || 'ok' }));
   turn.append(cards);
   appendTurn(turn);
 }

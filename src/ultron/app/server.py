@@ -174,7 +174,16 @@ def create_app() -> FastAPI:
             except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             envelope = engine.build_inline_genui_envelope(result, canary)
-            return _jsonable({"ok": True, "result": result, "candidate": canary["candidate"], "canary_id": canary["canary_id"], "envelope": envelope})
+            return _jsonable(
+                {
+                    "ok": True,
+                    "run_id": envelope.run_id,
+                    "candidate_hash": _short_hash(canary["candidate"].content_hash),
+                    "canary_id": canary["canary_id"],
+                    "active_pointer_version": engine.current_pointer_version(),
+                    "envelope": envelope,
+                }
+            )
         if cmd.type is ActionType.RUN_BENCHMARK:
             candidate_hash = str(cmd.payload.get("candidate_hash") or engine.last_candidate_hash or "")
             if not candidate_hash:
@@ -185,10 +194,10 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             except (KeyError, PermissionError, ValueError) as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
-            return _jsonable({"ok": True, "evaluation": evaluation})
+            return _jsonable({"ok": True, "candidate_hash": _short_hash(candidate_hash), "canary_id": str(cmd.payload.get("canary_id") or engine.last_canary_id or ""), "status": "benchmark_complete"})
         if cmd.type is ActionType.GIVE_FEEDBACK:
             event = engine.submit_feedback(str(cmd.payload.get("run_id", engine.last_manifest.run_id if engine.last_manifest else "run")), int(cmd.payload.get("rating", 1)), str(cmd.payload.get("comment", "")), actor=principal.subject if principal else None)
-            return _jsonable({"ok": True, "feedback": event})
+            return _jsonable({"ok": True, "run_id": event.run_id, "status": event.event_type.value})
         if cmd.type is ActionType.APPROVE_PROMOTION:
             candidate_hash = str(cmd.payload.get("candidate_hash") or "")
             try:
@@ -197,20 +206,20 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             except (KeyError, PermissionError, ValueError) as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
-            return _jsonable({"ok": True, "decision": decision})
+            return _jsonable({"ok": True, "candidate_hash": _short_hash(candidate_hash), "promoted": bool(decision.get("promoted")), "active_pointer_version": engine.current_pointer_version(), "status": "promotion_decided"})
         if cmd.type is ActionType.ROLLBACK_CANARY:
             canary_id = str(cmd.payload.get("canary_id") or engine.last_canary_id or "")
             if not canary_id:
                 raise HTTPException(status_code=403, detail="canary rejected by policy")
             report = engine.rollback_controller.rollback(canary_id, actor=principal.subject if principal else None)
             engine.telemetry.increment("rollbacks", event="rollback", subject=principal.subject if principal else None)
-            return _jsonable({"ok": True, "rollback": report})
+            return _jsonable({"ok": True, "canary_id": canary_id, "status": "rollback_complete"})
         if cmd.type is ActionType.RESTORE_MODULE:
             restored = engine.atrophy_and_restore(str(cmd.payload.get("module_hash") or "") or None, actor=principal.subject if principal else None)
-            return _jsonable({"ok": True, "restored": restored})
+            return _jsonable({"ok": True, "module_hash": _short_hash(str(restored.get("module_hash") or "")), "restored": bool(restored.get("restored")), "status": "restore_complete"})
         if cmd.type is ActionType.REQUEST_PERMISSION_EXPANSION:
             request = engine.record_permission_expansion_request(cmd.payload, actor=principal.subject if principal else None)
-            return _jsonable({"ok": True, "permission_expansion": request})
+            return _jsonable({"ok": True, "request_id": _short_hash(str(request.get("request_id") or request.get("id") or "")), "status": request.get("status")})
         raise HTTPException(status_code=403, detail="unsupported privileged action")
 
     return app
@@ -242,6 +251,10 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
     return value
+
+
+def _short_hash(value: str | None) -> str | None:
+    return value[:12] if value else None
 
 
 if __name__ == "__main__":

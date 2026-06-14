@@ -68,15 +68,14 @@ def test_actor_audit_in_memory_and_durable_promote_restore(tmp_path):
     client = TestClient(create_app())
     csrf = _csrf(client)
     submitted = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "actor audit"}, "csrf_token": csrf})
-    candidate_hash = submitted.json()["candidate"]["content_hash"]
+    candidate_hash = client.app.state.triage.last_candidate_hash
     canary_id = submitted.json()["canary_id"]
     assert _privileged(client, csrf, "ROLLBACK_CANARY", {"canary_id": canary_id}).status_code == 200
     quarantine_events = [entry for entry in client.app.state.triage.ledger._entries if entry.kind is SideEffectKind.QUARANTINE]
     assert quarantine_events[-1].actor == "local-operator"
     assert quarantine_events[-1].payload["actor"] == "local-operator"
-    run_entries = client.app.state.triage.ledger.entries_for_run(submitted.json()["result"]["run_manifest"]["run_id"])
+    run_entries = client.app.state.triage.ledger.entries_for_run(submitted.json()["envelope"]["run_id"])
     assert run_entries and {entry.actor for entry in run_entries} == {"local-operator"}
-    assert submitted.json()["result"]["run_manifest"]["actor"] == "local-operator"
 
     app = build_durable_triage_app_for_tests(str(tmp_path / "durable.sqlite"))
     app.seed_baseline()
@@ -98,11 +97,11 @@ def test_metrics_counters_and_no_secret_fields():
     csrf = _csrf(client)
     submitted = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "metrics"}, "csrf_token": csrf})
     body = submitted.json()
-    no_csrf = client.post("/api/action", json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": body["candidate"]["content_hash"], "canary_id": body["canary_id"]}})
+    no_csrf = client.post("/api/action", json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": client.app.state.triage.last_candidate_hash, "canary_id": body["canary_id"]}})
     assert no_csrf.status_code == 403
-    stale = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": body["candidate"]["content_hash"], "canary_id": body["canary_id"]}, pointer_version=client.app.state.triage.current_pointer_version() - 1)
+    stale = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": client.app.state.triage.last_candidate_hash, "canary_id": body["canary_id"]}, pointer_version=client.app.state.triage.current_pointer_version() - 1)
     assert stale.status_code == 403
-    benchmarked = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": body["candidate"]["content_hash"], "canary_id": body["canary_id"]})
+    benchmarked = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": client.app.state.triage.last_candidate_hash, "canary_id": body["canary_id"]})
     assert benchmarked.status_code == 200
     rolled = _privileged(client, csrf, "ROLLBACK_CANARY", {"canary_id": body["canary_id"]})
     assert rolled.status_code == 200

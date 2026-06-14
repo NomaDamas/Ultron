@@ -1339,17 +1339,50 @@ SECRET_PATTERNS = [
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\b[A-Fa-f0-9]{32,}\b"),
 ]
+HIGH_ENTROPY_PATTERNS = [
+    re.compile(r"\b(?=[A-Za-z0-9._~+/=-]{20,}\b)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{20,}\b"),
+    re.compile(r"\b[A-Za-z0-9+/=_-]{24,}\b"),
+]
+COMMON_REQUEST_WORDS = {
+    "authentication",
+    "dashboard",
+    "benchmark",
+    "permission",
+    "personalization",
+    "evaluation",
+    "triage",
+    "request",
+    "feedback",
+    "rollback",
+    "restore",
+}
+
+
+def _request_redaction_fragments(request: str) -> list[str]:
+    fragments: set[str] = {request}
+    compact = request.strip()
+    if len(compact) >= 80:
+        fragments.add(compact[:80])
+    for token in re.findall(r"[A-Za-z0-9._~+/=@:-]+", request):
+        if len(token) >= 12 and (token.lower() not in COMMON_REQUEST_WORDS or _looks_secret_or_entropy(token)):
+            fragments.add(token)
+            fragments.update(token[:length] for length in range(12, len(token) + 1))
+    return sorted(fragments, key=len, reverse=True)
+
+
+def _looks_secret_or_entropy(token: str) -> bool:
+    return any(pattern.search(token) for pattern in [*SECRET_PATTERNS, *HIGH_ENTROPY_PATTERNS])
+
+
 
 
 def _redact(text: Any, request_text: str | None = None) -> str:
     redacted = str(text or "No summary available")
     request = str(request_text or "").strip()
     if request:
-        redacted = redacted.replace(request, "[redacted]")
-        for token in request.split():
-            if len(token) >= 8:
-                redacted = redacted.replace(token, "[redacted]")
-    for pattern in SECRET_PATTERNS:
+        for fragment in _request_redaction_fragments(request):
+            redacted = redacted.replace(fragment, "[redacted]")
+    for pattern in [*SECRET_PATTERNS, *HIGH_ENTROPY_PATTERNS]:
         redacted = pattern.sub("[redacted]", redacted)
     return redacted
 

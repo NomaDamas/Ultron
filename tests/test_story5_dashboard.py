@@ -53,7 +53,7 @@ def test_get_personalization_read_only_redacted_and_csp():
     csrf = _csrf(client)
     submit = _action(client, csrf, "SUBMIT_REQUEST", {"request_text": RAW_REQUEST})
     assert submit.status_code == 200
-    run_id = submit.json()["result"]["run_manifest"]["run_id"]
+    run_id = submit.json()["envelope"]["run_id"]
     feedback = _action(client, csrf, "GIVE_FEEDBACK", {"run_id": run_id, "rating": -1, "comment": RAW_COMMENT})
     assert feedback.status_code == 200
 
@@ -125,11 +125,11 @@ def test_every_mutating_action_requires_session_csrf_and_records_actor(action_ty
         expected_kind = SideEffectKind.ADAPTER_STATE
     elif action_type == "GIVE_FEEDBACK":
         submit = _action(client, csrf, "SUBMIT_REQUEST", {"request_text": "story5 feedback seed"})
-        payload = {"run_id": submit.json()["result"]["run_manifest"]["run_id"], "rating": 1, "comment": "ok"}
+        payload = {"run_id": submit.json()["envelope"]["run_id"], "rating": 1, "comment": "ok"}
         expected_kind = SideEffectKind.FEEDBACK_EVENT
     elif action_type in {"RUN_BENCHMARK", "APPROVE_PROMOTION"}:
         submit = _action(client, csrf, "SUBMIT_REQUEST", {"request_text": "story5 benchmark seed"})
-        candidate_hash = submit.json()["candidate"]["content_hash"]
+        candidate_hash = engine.last_candidate_hash
         canary_id = submit.json()["canary_id"]
         payload = {"candidate_hash": candidate_hash, "canary_id": canary_id}
         if action_type == "APPROVE_PROMOTION":
@@ -157,7 +157,7 @@ def test_every_mutating_action_requires_session_csrf_and_records_actor(action_ty
     if action_type != "RESTORE_MODULE":
         assert _has_actor_for_kind(engine, expected_kind)
     else:
-        assert response.json()["restored"]["restored"] is True
+        assert response.json()["restored"] is True
     if action_type != "RESTORE_MODULE":
         assert "local-operator" in _ledger_actors(engine)
 
@@ -245,7 +245,7 @@ def test_restore_module_in_memory_records_prune_and_restore_actor_ledgers():
     response = _action(client, csrf, "RESTORE_MODULE", {"module_hash": target}, pointer_version)
 
     assert response.status_code == 200, response.text
-    assert response.json()["restored"] == {"module_hash": target, "pruned": True, "restored": True}
+    assert response.json() == {"ok": True, "module_hash": target[:12], "restored": True, "status": "restore_complete"}
     entries = [entry for entry in engine._ledger_entries() if entry.kind is SideEffectKind.POINTER_TRANSITION and entry.module_hash == target]
     assert [entry.payload["action"] for entry in entries[-1:]] == ["restore"]
     assert all(entry.actor == "local-operator" for entry in entries[-1:])

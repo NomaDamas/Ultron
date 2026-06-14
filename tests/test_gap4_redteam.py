@@ -147,7 +147,7 @@ def test_no_fabricated_submit_metrics_and_promotion_requires_real_benchmark() ->
     assert submitted.status_code == 200
     submitted_body = submitted.json()
     assert "evaluation" not in submitted_body
-    candidate_hash = submitted_body["candidate"]["content_hash"]
+    candidate_hash = client.app.state.triage.last_candidate_hash
     assert client.app.state.triage.has_promotable_evidence(candidate_hash) is False
 
     denied = client.post(
@@ -165,10 +165,7 @@ def test_no_fabricated_submit_metrics_and_promotion_requires_real_benchmark() ->
 
     benchmarked = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": candidate_hash}, "csrf_token": csrf, "active_pointer_version": client.app.state.triage.current_pointer_version()})
     assert benchmarked.status_code == 200
-    evaluation = benchmarked.json()["evaluation"]
-    assert evaluation["report"]["evidence_label"] in {"BENCHMARK", EvidenceLabel.BENCHMARK.value}
-    assert evaluation["report"]["paired_tasks"] >= 10
-    assert evaluation["report"]["promotable"] is True
+    assert benchmarked.json()["status"] == "benchmark_complete"
     assert client.app.state.triage.has_promotable_evidence(candidate_hash) is True
 
     before_approval = client.app.state.triage.pointer_store.get(client.app.state.triage.pointer_key)
@@ -183,7 +180,7 @@ def test_no_fabricated_submit_metrics_and_promotion_requires_real_benchmark() ->
         },
     )
     assert approved.status_code == 200
-    assert approved.json()["decision"]["promoted"] is True
+    assert approved.json()["promoted"] is True
     assert client.app.state.triage.pointer_store.get(client.app.state.triage.pointer_key)[0] == before_approval[0] + 1
     assert candidate_hash in client.app.state.triage.pointer_store.get(client.app.state.triage.pointer_key)[1]
 

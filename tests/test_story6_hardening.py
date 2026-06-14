@@ -96,24 +96,79 @@ def test_csp_shells_and_static_assets_are_strict_scan_clean():
 def test_no_raw_request_feedback_or_secrets_across_envelope_and_read_surfaces():
     client = _client()
     csrf = _csrf(client)
-    request = "Please triage story6-raw-sentinel-629d0d88 ghp_story6SECRETtoken1234567890 sk-story6SECRETtoken1234567890 story6-secret@example.com 0123456789abcdef0123456789abcdef01234567"
+    sentinel = "story6rawsentinel629d0d88XYZabcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    truncated_prefix = sentinel[:80]
+    request = f"Please triage authentication dashboard benchmark {sentinel} ghp_story6SECRETtoken1234567890 sk-story6SECRETtoken1234567890 story6-secret@example.com 0123456789abcdef0123456789abcdef01234567"
     submit = _action(client, csrf, "SUBMIT_REQUEST", {"request_text": request})
     assert submit.status_code == 200, submit.text
-    run_id = submit.json()["result"]["run_manifest"]["run_id"]
+    submit_body = submit.json()
+    assert set(submit_body) == {"ok", "run_id", "candidate_hash", "canary_id", "active_pointer_version", "envelope"}
+    assert len(submit_body["candidate_hash"]) <= 12
+    run_id = submit_body["envelope"]["run_id"]
     feedback = _action(client, csrf, "GIVE_FEEDBACK", {"run_id": run_id, "rating": -1, "comment": "story6 feedback raw sentinel ghp_story6SECRETtoken1234567890"})
     assert feedback.status_code == 200, feedback.text
+    assert set(feedback.json()) == {"ok", "run_id", "status"}
 
-    surfaces = {"InlineGenUiEnvelope": submit.json()["envelope"]}
+    surfaces = {"SUBMIT_REQUEST": submit_body, "GIVE_FEEDBACK": feedback.json(), "InlineGenUiEnvelope": submit_body["envelope"]}
     for endpoint in ["/api/personalization", "/api/toolbelt", "/api/ecology", "/api/runs", "/api/ledger", "/api/metrics"]:
         response = client.get(endpoint)
         assert response.status_code == 200
         surfaces[endpoint] = response.json()
     combined = _dump(surfaces)
-    for secret in SECRET_VALUES:
+    for secret in [*SECRET_VALUES, sentinel, truncated_prefix, request]:
         assert secret not in combined
     assert "[redacted]" in combined or "redacted" in combined.lower()
 
 
+def test_redaction_preserves_common_words_and_blocks_truncated_prefixes():
+    from ultron.app.triage import _redact
+
+    request = "authentication dashboard benchmark sentinelZZZ1234567890abcdefghijklmnopqrstuvwx"
+    sentinel_prefix = "sentinelZZZ1234567890abcdefghijklmnopqrstuvwx"[:32]
+    leaked = f"authentication dashboard benchmark {sentinel_prefix} sk-story6SECRETtoken1234567890"
+    redacted = _redact(leaked, request)
+    assert "authentication" in redacted
+    assert "dashboard" in redacted
+    assert "benchmark" in redacted
+    assert sentinel_prefix not in redacted
+    assert "sk-story6SECRETtoken1234567890" not in redacted
+
+
+
+def test_action_responses_are_status_and_short_ids_only():
+    client = _client()
+    csrf = _csrf(client)
+    engine = client.app.state.triage
+    submit = _action(client, csrf, "SUBMIT_REQUEST", {"request_text": "story6 benchmark response audit"})
+    assert submit.status_code == 200, submit.text
+    body = submit.json()
+    candidate_hash = engine.last_candidate_hash
+    canary_id = body["canary_id"]
+
+    benchmark = _action(client, csrf, "RUN_BENCHMARK", {"candidate_hash": candidate_hash, "canary_id": canary_id}, engine.current_pointer_version())
+    assert benchmark.status_code == 200, benchmark.text
+    assert set(benchmark.json()) == {"ok", "candidate_hash", "canary_id", "status"}
+
+    approve = _action(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": candidate_hash}, engine.current_pointer_version())
+    assert approve.status_code == 200, approve.text
+    assert set(approve.json()) == {"ok", "candidate_hash", "promoted", "active_pointer_version", "status"}
+
+    rollback = _action(client, csrf, "ROLLBACK_CANARY", {"canary_id": canary_id}, engine.current_pointer_version())
+    assert rollback.status_code == 200, rollback.text
+    assert set(rollback.json()) == {"ok", "canary_id", "status"}
+
+    engine.registry.set_lifecycle(candidate_hash, ModuleLifecycle.PRUNED)
+    restore = _action(client, csrf, "RESTORE_MODULE", {"module_hash": candidate_hash}, engine.current_pointer_version())
+    assert restore.status_code == 200, restore.text
+    assert set(restore.json()) == {"ok", "module_hash", "restored", "status"}
+
+    permission = _action(client, csrf, "REQUEST_PERMISSION_EXPANSION", {"scope": "story6-secret", "reason": "ghp_story6SECRETtoken1234567890"}, engine.current_pointer_version())
+    assert permission.status_code == 200, permission.text
+    assert set(permission.json()) == {"ok", "request_id", "status"}
+
+    combined = _dump([benchmark.json(), approve.json(), rollback.json(), restore.json(), permission.json()])
+    assert "story6-secret" not in combined
+    assert "ghp_story6SECRETtoken1234567890" not in combined
 def test_animation_hint_budget_and_reduced_motion_runtime_guards():
     assert AnimationHint(kind="fade_in", duration_ms=1200, delay_ms=1000, reduced_motion_fallback="none")
     for payload in [
@@ -125,9 +180,18 @@ def test_animation_hint_budget_and_reduced_motion_runtime_guards():
     ]:
         with pytest.raises(ValidationError):
             AnimationHint(**payload)
-    chat_js = (STATIC / "chat.js").read_text()
-    assert "prefers-reduced-motion: reduce" in chat_js
-    assert "if (REDUCED_MOTION) return" in chat_js
+    chat_css = (STATIC / "chat.css").read_text()
+    for class_name, animation in re.findall(r"\.(anim-[\w-]+)\s*\{\s*animation:\s*([^;}]+)", chat_css):
+        duration = re.search(r"(\d+(?:\.\d+)?)(ms|s)\b", animation)
+        assert duration, class_name
+        milliseconds = float(duration.group(1)) * (1000 if duration.group(2) == "s" else 1)
+        assert milliseconds <= 1200, f"{class_name} is {milliseconds}ms"
+    reduced_motion = re.search(r"@media \(prefers-reduced-motion: reduce\) \{(?P<body>.*)\}\s*$", chat_css, re.DOTALL)
+    assert reduced_motion
+    reduced_body = reduced_motion.group("body")
+    assert "animation-duration: 1ms !important" in reduced_body
+    assert "body::before { animation: none; }" in reduced_body
+    assert ".ultron-orb, .ultron-orb::before, .ultron-orb::after { animation: none; }" in reduced_body
 
 
 @pytest.mark.parametrize("action_type", MUTATING_ACTIONS)
@@ -154,7 +218,7 @@ def test_benchmark_provenance_rollback_no_poisoning_actor_audit_and_read_only_se
 
     submit = _action(client, csrf, "SUBMIT_REQUEST", {"request_text": "story6 gates sk-secret-no-leak"})
     assert submit.status_code == 200, submit.text
-    candidate_hash = submit.json()["candidate"]["content_hash"]
+    candidate_hash = engine.last_candidate_hash
     canary_id = submit.json()["canary_id"]
 
     manual = engine.evaluate_and_decide(candidate_hash, [PairedTask(task_id=f"manual-{i}", baseline_metric=1.0, candidate_metric=1.4) for i in range(10)], canary_id, GuardrailMetrics(), GuardrailMetrics())
@@ -167,15 +231,14 @@ def test_benchmark_provenance_rollback_no_poisoning_actor_audit_and_read_only_se
 
     benchmark = _action(client, csrf, "RUN_BENCHMARK", {"candidate_hash": candidate_hash, "canary_id": canary_id})
     assert benchmark.status_code == 200, benchmark.text
-    assert benchmark.json()["evaluation"]["report"]["provenance"] == "benchmark_runner"
-    assert benchmark.json()["evaluation"]["report"]["promotable"] is True
+    assert engine.has_promotable_evidence(candidate_hash)
     approve = _action(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": candidate_hash})
     assert approve.status_code == 200, approve.text
 
     rollback_canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "story6 rollback"}, actor="local-operator")
     rollback = _action(client, csrf, "ROLLBACK_CANARY", {"canary_id": rollback_canary["canary_id"]})
     assert rollback.status_code == 200, rollback.text
-    assert rollback.json()["rollback"]["dropped_namespaces"]
+    assert rollback.json()["status"] == "rollback_complete"
     assert engine.canary_active(rollback_canary["canary_id"]) is False
 
     target = candidate_hash
@@ -228,5 +291,5 @@ def test_fail_closed_live_seams_and_default_fake_flow(monkeypatch):
     csrf = _csrf(fresh)
     submit = _action(fresh, csrf, "SUBMIT_REQUEST", {"request_text": "default fake green"})
     assert submit.status_code == 200, submit.text
-    bench = _action(fresh, csrf, "RUN_BENCHMARK", {"candidate_hash": submit.json()["candidate"]["content_hash"], "canary_id": submit.json()["canary_id"]})
+    bench = _action(fresh, csrf, "RUN_BENCHMARK", {"candidate_hash": fresh.app.state.triage.last_candidate_hash, "canary_id": submit.json()["canary_id"]})
     assert bench.status_code == 200, bench.text

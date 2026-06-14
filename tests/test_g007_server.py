@@ -105,7 +105,7 @@ def test_unknown_approve_promotion_denies_without_polluting_pointer_and_requests
 
     submitted = _user_action(client, csrf, "SUBMIT_REQUEST", {"request_text": "after deadbeef"})
     assert submitted.status_code == 200
-    assert submitted.json()["result"]["run_manifest"]["signature"]
+    assert submitted.json()["envelope"]["manifest_signature_ok"] is True
 
 
 def test_non_promotable_evaluated_candidate_denies_without_pointer_change():
@@ -140,8 +140,8 @@ def test_submit_request_benchmark_then_approve_promotion_advances_pointer():
     submitted = _user_action(client, csrf, "SUBMIT_REQUEST", {"request_text": "triage server"})
     assert submitted.status_code == 200
     body = submitted.json()
-    assert body["result"]["run_manifest"]["signature"]
-    candidate_hash = body["candidate"]["content_hash"]
+    assert body["envelope"]["manifest_signature_ok"] is True
+    candidate_hash = engine.last_candidate_hash
     assert "evaluation" not in body
     envelope = body["envelope"]
     assert envelope["manifest_signature_ok"] is True
@@ -152,14 +152,13 @@ def test_submit_request_benchmark_then_approve_promotion_advances_pointer():
     assert envelope["provenance"]["active_pointer_version"] == str(before)
     benchmarked = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": candidate_hash, "canary_id": body["canary_id"]})
     assert benchmarked.status_code == 200
-    assert benchmarked.json()["evaluation"]["report"]["promotable"] is True
-    assert benchmarked.json()["evaluation"]["report"]["evidence_label"] == "benchmark_evidence"
+    assert engine.has_promotable_evidence(candidate_hash)
     assert engine.current_pointer_version() == before
 
     approved = _privileged(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": candidate_hash})
 
     assert approved.status_code == 200
-    assert approved.json()["decision"]["promoted"] is True
+    assert approved.json()["promoted"] is True
     assert engine.current_pointer_version() == before + 1
 
 
@@ -168,7 +167,7 @@ def test_submit_request_and_stale_privileged_rejected():
     csrf = _authed(client)
     submitted = _user_action(client, csrf, "SUBMIT_REQUEST", {"request_text": "triage server"})
     assert submitted.status_code == 200
-    candidate_hash = submitted.json()["candidate"]["content_hash"]
+    candidate_hash = client.app.state.triage.last_candidate_hash
     stale = _privileged(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": candidate_hash}, 0)
     assert stale.status_code == 403
 
@@ -185,8 +184,8 @@ def test_submit_request_and_give_feedback_require_session_csrf_and_record_actor(
 
     submitted = _user_action(client, csrf, "SUBMIT_REQUEST", {"request_text": "auth gate"})
     assert submitted.status_code == 200
-    assert submitted.json()["result"]["run_manifest"]["actor"] == "local-operator"
-    run_id = submitted.json()["result"]["run_manifest"]["run_id"]
+    assert submitted.json()["envelope"]["run_id"]
+    run_id = submitted.json()["envelope"]["run_id"]
     run_entries = client.app.state.triage.ledger.entries_for_run(run_id)
     assert run_entries and {entry.actor for entry in run_entries} == {"local-operator"}
 
@@ -211,7 +210,7 @@ def test_rollback_canary_policy_denies_missing_and_allows_active_canary():
     canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "rollback-candidate"})
     active = _privileged(client, csrf, "ROLLBACK_CANARY", {"canary_id": canary["canary_id"]})
     assert active.status_code == 200
-    assert active.json()["rollback"]["dropped_namespaces"]
+    assert active.json()["status"] == "rollback_complete"
 
     inactive = _privileged(client, csrf, "ROLLBACK_CANARY", {"canary_id": canary["canary_id"]})
     assert inactive.status_code == 403
@@ -225,9 +224,9 @@ def test_permission_expansion_is_recorded_pending_not_applied():
     response = _privileged(client, csrf, "REQUEST_PERMISSION_EXPANSION", {"tool": "network", "reason": "debug"})
 
     assert response.status_code == 200
-    request = response.json()["permission_expansion"]
-    assert request["status"] == "pending_human_approval"
-    assert engine.pending_permission_expansions == [request]
+    body = response.json()
+    assert body["status"] == "pending_human_approval"
+    assert engine.pending_permission_expansions[-1]["request_id"].startswith(body["request_id"])
 
 
 def test_raw_unknown_ui_panel_injection_attempt_rejected():

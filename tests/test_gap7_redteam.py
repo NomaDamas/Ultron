@@ -149,7 +149,7 @@ def test_api_actor_audit_for_benchmark_promotion_and_rollback():
         headers={"X-CSRF-Token": csrf},
     )
     assert submit.status_code == 200
-    candidate_hash = submit.json()["candidate"]["content_hash"]
+    candidate_hash = engine.last_candidate_hash
     canary_id = submit.json()["canary_id"]
 
     benchmark = client.post(
