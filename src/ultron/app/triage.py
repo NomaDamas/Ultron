@@ -596,7 +596,7 @@ class TriageApp:
         rationale = f"summary:{summary.summary_hash[:12]} runs={summary.n_runs} feedback={summary.n_feedback} budget_tighten"
         return planned.model_copy(update={"primitive": VariationPrimitive.BUDGET_TIGHTEN, "change": {"budget": {"max_tool_calls": max(1, max_tool_calls - 1)}}, "rationale": rationale})
 
-    def propose_and_canary(self, primitive: VariationPrimitive | str, change: dict[str, Any], request_text: str = "candidate triage") -> dict[str, Any]:
+    def propose_and_canary(self, primitive: VariationPrimitive | str, change: dict[str, Any], request_text: str = "candidate triage", actor: str | None = None) -> dict[str, Any]:
         self.seed_baseline()
         version, active = self.pointer_store.get(self.pointer_key)
         parent_hash = active[-1]
@@ -657,10 +657,11 @@ class TriageApp:
             variation_primitive_id=proposal.primitive.value,
             canary_id=canary_id,
             resolved_ui_spec_hash=ui_spec.spec_hash,
-            actor=None,
+            actor=actor,
         ).sign(signer=self.manifest_signer)
         result_payload = result.model_dump(mode="json")
-        self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", candidate_hash, canary_id, SideEffectKind.ADAPTER_STATE, result_payload)
+        self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", candidate_hash, canary_id, SideEffectKind.ADAPTER_STATE, result_payload, actor=actor)
+        self.run_manifests.append(run_manifest.model_copy(deep=True))
         self.last_candidate_hash = candidate_hash
         self.last_canary_id = canary_id
         return {"candidate": candidate, "proposal": proposal, "canary_id": canary_id, "candidate_run": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec, "mutation_diff": change}
@@ -1094,9 +1095,52 @@ class TriageApp:
                 pruned_hashes.append(evict)
             restored = uow.restore(target, restore_version, restored_active, uuid.uuid4().hex, actor or DEFAULT_LOCAL_PRINCIPAL.subject, key=self.pointer_key, pruned_hashes=pruned_hashes) is not None
         else:
+            audit_actor = actor or DEFAULT_LOCAL_PRINCIPAL.subject
+            pruned_prior_version, pruned_prior_active = self.pointer_store.get(self.pointer_key)
             pruned = self.evolution_loop.prune(target, is_critical_seed=(target == active[0]), approved=True)
-            restore_version, _ = self.pointer_store.get(self.pointer_key)
+            pruned_new_version, pruned_new_active = self.pointer_store.get(self.pointer_key)
+            if pruned:
+                self._append_ledger(
+                    uuid.uuid4().hex,
+                    target,
+                    target,
+                    None,
+                    SideEffectKind.POINTER_TRANSITION,
+                    {
+                        "action": "prune",
+                        "prior_version": pruned_prior_version,
+                        "new_version": pruned_new_version,
+                        "prior_hashes": pruned_prior_active,
+                        "new_hashes": pruned_new_active,
+                        "evicted_hashes": [],
+                        "actor": audit_actor,
+                        "scope_key": list(self.pointer_key),
+                    },
+                    actor=audit_actor,
+                )
+            restore_version, restore_prior_active = self.pointer_store.get(self.pointer_key)
             restored = self.evolution_loop.restore(target, DEFAULT_SCOPE, DEFAULT_WORKFLOW, restore_version)
+            restore_new_version, restore_new_active = self.pointer_store.get(self.pointer_key)
+            if restored:
+                evicted_hashes = [hash_value for hash_value in restore_prior_active if hash_value not in restore_new_active and hash_value != target]
+                self._append_ledger(
+                    uuid.uuid4().hex,
+                    target,
+                    target,
+                    None,
+                    SideEffectKind.POINTER_TRANSITION,
+                    {
+                        "action": "restore",
+                        "prior_version": restore_version,
+                        "new_version": restore_new_version,
+                        "prior_hashes": restore_prior_active,
+                        "new_hashes": restore_new_active,
+                        "evicted_hashes": evicted_hashes,
+                        "actor": audit_actor,
+                        "scope_key": list(self.pointer_key),
+                    },
+                    actor=audit_actor,
+                )
         if pruned:
             self.telemetry.increment("prunes", event="prune", subject=actor)
         if restored:

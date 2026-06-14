@@ -170,7 +170,7 @@ def create_app() -> FastAPI:
             request_text = str(cmd.payload.get("request_text", ""))
             try:
                 result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text, actor=principal.subject if principal else None)
-                canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text)
+                canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text, actor=principal.subject if principal else None)
             except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             envelope = engine.build_inline_genui_envelope(result, canary)

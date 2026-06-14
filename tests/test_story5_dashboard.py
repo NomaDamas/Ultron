@@ -158,3 +158,56 @@ def test_every_mutating_action_requires_session_csrf_and_records_actor(action_ty
         assert response.json()["restored"]["restored"] is True
     if action_type != "RESTORE_MODULE":
         assert "local-operator" in _ledger_actors(engine)
+
+
+def test_submit_request_attributes_canary_run_and_ledger_to_actor():
+    client = _client()
+    csrf = _csrf(client)
+
+    response = _action(client, csrf, "SUBMIT_REQUEST", {"request_text": "story5 canary actor"})
+
+    assert response.status_code == 200, response.text
+    engine = client.app.state.triage
+    canary_id = response.json()["canary_id"]
+    canary_manifest = next(manifest for manifest in engine.run_manifests if manifest.canary_id == canary_id)
+    assert canary_manifest.actor == "local-operator"
+    canary_entries = [entry for entry in engine._ledger_entries() if entry.canary_id == canary_id and entry.kind is SideEffectKind.ADAPTER_STATE]
+    assert canary_entries
+    assert all(entry.actor == "local-operator" for entry in canary_entries)
+
+
+def test_restore_module_in_memory_records_prune_and_restore_actor_ledgers():
+    client = _client()
+    csrf = _csrf(client)
+    engine = client.app.state.triage
+    engine.seed_baseline()
+    target = engine.pointer_store.get(engine.pointer_key)[1][0]
+    engine.evolution_loop.prune(target, is_critical_seed=True, approved=True)
+    engine.registry.set_lifecycle(target, ModuleLifecycle.PRUNED)
+    pointer_version = engine.current_pointer_version()
+
+    response = _action(client, csrf, "RESTORE_MODULE", {"module_hash": target}, pointer_version)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["restored"] == {"module_hash": target, "pruned": True, "restored": True}
+    entries = [entry for entry in engine._ledger_entries() if entry.kind is SideEffectKind.POINTER_TRANSITION and entry.module_hash == target]
+    assert [entry.payload["action"] for entry in entries[-1:]] == ["restore"]
+    assert all(entry.actor == "local-operator" for entry in entries[-1:])
+    assert all(entry.payload["actor"] == "local-operator" for entry in entries[-1:])
+
+
+def test_atrophy_and_restore_in_memory_records_prune_and_restore_actor_ledgers():
+    client = _client()
+    engine = client.app.state.triage
+    canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "story5 restore audit"})
+    target = canary["candidate"].content_hash
+    engine.benchmark_and_decide(target, canary_id=canary["canary_id"])
+    engine.approve_promotion(target, engine.current_pointer_version(), actor="local-operator")
+
+    response = engine.atrophy_and_restore(target, actor="local-operator")
+
+    assert response == {"module_hash": target, "pruned": True, "restored": True}
+    entries = [entry for entry in engine._ledger_entries() if entry.kind is SideEffectKind.POINTER_TRANSITION and entry.module_hash == target]
+    assert [entry.payload["action"] for entry in entries[-2:]] == ["prune", "restore"]
+    assert all(entry.actor == "local-operator" for entry in entries[-2:])
+    assert all(entry.payload["actor"] == "local-operator" for entry in entries[-2:])
