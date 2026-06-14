@@ -2,6 +2,22 @@
 
 Ultron is a modular self-evolving harness ecology built around a preserved `hermes-agent` core and a generative UI triage app. It keeps upstream Hermes behind explicit seams while Ultron owns module registration, composition, evolution, evaluation, persistence, auth, observability, and rollback safety.
 
+## Quickstart
+
+```bash
+git clone https://github.com/NomaDamas/Ultron.git
+cd Ultron            # if it cloned into a nested folder, cd into the one containing run.sh
+./run.sh             # creates .venv, installs, starts the server
+```
+
+Then open **http://localhost:8799** (chat console) and **http://localhost:8799/dashboard** (ops dashboard).
+
+Notes:
+- macOS/zsh: if `python` is "command not found", that's expected — `run.sh` uses `python3` and the venv binary directly. Set `PYTHON=python3.11` if needed.
+- Manual run (no script): `python3 -m venv .venv && ./.venv/bin/python -m pip install -e ".[dev]" && ./.venv/bin/python -m uvicorn ultron.app.server:create_app --factory --port 8799`
+- Hard-refresh the browser (Cmd+Shift+R) after restart; the server log should show `GET /static/chat.css 200`.
+- Default is **local/demo (fake) mode** — no API key needed. Live mode is opt-in (see "Going live" below); without keys/deps it fails closed, never faking results.
+
 ## Architecture
 
 - `module/`: typed harness modules, blobs, surface contracts, privacy and fitness metadata.
