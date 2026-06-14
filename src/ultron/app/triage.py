@@ -519,7 +519,7 @@ class TriageApp:
                 "rationale": f"Last stored candidate derived from redacted summary {summary.summary_hash[:19]}.",
                 "candidate_short_hash": _short_hash(candidate_hash),
                 "lifecycle": lifecycle,
-                "canary_id": self.last_canary_id if self.last_canary_id and self.canary_active(self.last_canary_id) else None,
+                "canary_id": _short_hash(self.last_canary_id) if self.last_canary_id and self.canary_active(self.last_canary_id) else None,
                 "promotable": self.has_promotable_evidence(candidate_hash),
             }
         return {
@@ -703,12 +703,37 @@ class TriageApp:
             self.registry.set_lifecycle(candidate_hash, ModuleLifecycle.DECAYING)
         return {"report": report, "outcome": outcome, "promotable": report.promotable, "canary_id": canary_id}
 
+    def _known_canary_for_candidate(self, candidate_hash: str, canary_id: str | None = None) -> str | None:
+        if canary_id and self.canary_store.read(canary_id, "adapter_state", "candidate_hash") == candidate_hash:
+            return canary_id
+        evaluated = self.evaluated_candidates.get(candidate_hash, {})
+        evaluated_canary = evaluated.get("canary_id")
+        if isinstance(evaluated_canary, str) and self.canary_store.read(evaluated_canary, "adapter_state", "candidate_hash") == candidate_hash:
+            return evaluated_canary
+        if self.last_candidate_hash == candidate_hash and self.last_canary_id and self.canary_store.read(self.last_canary_id, "adapter_state", "candidate_hash") == candidate_hash:
+            return self.last_canary_id
+        derived = f"canary-{candidate_hash[:12]}"
+        if self.canary_store.read(derived, "adapter_state", "candidate_hash") == candidate_hash:
+            return derived
+        return None
+
+    def _resolve_benchmark_canary(self, candidate_hash: str, provided_canary_id: str | None = None) -> str:
+        known_canary = self._known_canary_for_candidate(candidate_hash, provided_canary_id)
+        if provided_canary_id:
+            if known_canary != provided_canary_id:
+                raise PermissionError("candidate benchmark canary is not known for candidate")
+            return provided_canary_id
+        if known_canary is None:
+            raise PermissionError("candidate benchmark requires a known canary")
+        return known_canary
+
     def benchmark_and_decide(self, candidate_hash: str, fixture: BenchmarkFixture | None = None, canary_id: str | None = None, actor: str | None = None) -> dict[str, Any]:
         self.seed_baseline()
         try:
             self.registry.get(candidate_hash)
         except KeyError as exc:
             raise PolicyDenied("candidate module is not registered") from exc
+        resolved_canary_id = self._resolve_benchmark_canary(candidate_hash, canary_id)
         fixture = fixture or DEFAULT_CODE_TRIAGE_V0
         _, active = self.pointer_store.get(self.pointer_key)
         baseline_hashes = [hash_value for hash_value in active if hash_value != candidate_hash]
@@ -722,7 +747,7 @@ class TriageApp:
         decision = self.evaluate_and_decide(
             candidate_hash,
             paired_tasks,
-            canary_id or self.last_canary_id,
+            resolved_canary_id,
             runner.guardrails_before,
             runner.guardrails_after,
         )
@@ -740,7 +765,7 @@ class TriageApp:
         self.evaluated_candidates[candidate_hash] = {"report": report, "outcome": decision["outcome"], "canary_id": decision["canary_id"]}
         self._update_fitness_for_modules([candidate_hash], time.time(), benchmark_report=report, feedback_summary=self.feedback_summary(candidate_hash))
         self.telemetry.increment("benchmarks_run", event="benchmark_run", subject=actor)
-        self._append_ledger("benchmark", candidate_hash, candidate_hash, canary_id or self.last_canary_id, SideEffectKind.TELEMETRY, {"action": "RUN_BENCHMARK", "candidate_hash": candidate_hash}, actor=actor)
+        self._append_ledger("benchmark", candidate_hash, candidate_hash, resolved_canary_id, SideEffectKind.TELEMETRY, {"action": "RUN_BENCHMARK", "candidate_hash": candidate_hash}, actor=actor)
         return decision
 
     def _benchmark_request(self, module_hashes: list[str], task: Any, side: str) -> AdapterRunRequest:
@@ -881,7 +906,7 @@ class TriageApp:
     def safety_status(self) -> dict[str, Any]:
         return {
             "pending_permission_expansions": [self._safe_permission_request(request) for request in self.pending_permission_expansions],
-            "last_canary_id": self.last_canary_id,
+            "last_canary_id": _short_hash(self.last_canary_id),
             "last_candidate_hash": _short_hash(self.last_candidate_hash),
             "active_pointer_version": self.current_pointer_version(),
         }
@@ -930,7 +955,7 @@ class TriageApp:
 
     def _run_summary(self, manifest: RunManifest) -> dict[str, Any]:
         return {
-            "run_id": manifest.run_id,
+            "run_id": _short_hash(manifest.run_id),
             "workflow": manifest.workflow_fingerprint,
             "active_module_set_hash": _short_hash(manifest.active_module_set_hash),
             "model_snapshot": {
@@ -943,10 +968,10 @@ class TriageApp:
 
     def _ledger_summary(self, entry: LedgerEntry) -> dict[str, Any]:
         return {
-            "entry_id": entry.entry_id,
+            "entry_id": _short_hash(entry.entry_id),
             "kind": entry.kind.value,
             "module_hash": _short_hash(entry.module_hash),
-            "canary_id": entry.canary_id,
+            "canary_id": _short_hash(entry.canary_id),
             "actor": entry.actor,
             "created_at": entry.created_at,
             "quarantined": entry.quarantined,

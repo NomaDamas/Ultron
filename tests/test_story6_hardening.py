@@ -175,7 +175,7 @@ def test_malformed_action_validation_does_not_echo_secret_bearing_extra_field_na
     assert "EXTRAfieldStory6SECRET" not in combined
 
 
-def test_action_success_responses_do_not_echo_payload_supplied_ids():
+def test_payload_supplied_benchmark_canary_is_rejected_and_not_reflected_on_read_surfaces():
     client = _client()
     csrf = _csrf(client)
     engine = client.app.state.triage
@@ -190,14 +190,13 @@ def test_action_success_responses_do_not_echo_payload_supplied_ids():
     assert raw_run_id not in feedback_body
     assert "ghp_RUNIDStory6SECRETtoken1234567890" not in feedback_body
 
-    raw_canary_id = "story6-canary-id-sentinel ghp_CANARYStory6SECRETtoken1234567890"
+    raw_canary_id = "ghp_FAKESECRETStory6CANARYtoken1234567890-canary"
     benchmark = _action(client, csrf, "RUN_BENCHMARK", {"candidate_hash": candidate_hash, "canary_id": raw_canary_id}, engine.current_pointer_version())
-    assert benchmark.status_code == 200, benchmark.text
-    benchmark_body = _dump(benchmark.json())
-    assert raw_canary_id not in benchmark_body
-    assert "ghp_CANARYStory6SECRETtoken1234567890" not in benchmark_body
-    assert benchmark.json()["canary_id"] == hashlib.sha256(raw_canary_id.encode()).hexdigest()[:12]
-    assert not benchmark.json()["canary_id"].startswith("ghp_")
+    assert benchmark.status_code == 403
+    combined = _dump([benchmark.json(), client.get("/api/ledger").json(), client.get("/api/personalization").json(), client.get("/api/ledger").json()["safety"]])
+    assert raw_canary_id not in combined
+    assert "ghp_FAKESECRETStory6CANARYtoken1234567890" not in combined
+    assert all(entry.get("canary_id") != raw_canary_id for entry in client.get("/api/ledger").json()["entries"])
 
 
 def test_live_unavailable_503_bodies_are_generic():
@@ -284,6 +283,8 @@ def test_action_responses_are_status_and_short_ids_only():
     assert benchmark.status_code == 200, benchmark.text
     assert set(benchmark.json()) == {"ok", "candidate_hash", "canary_id", "status"}
     assert benchmark.json()["canary_id"] == hashlib.sha256(canary_id.encode()).hexdigest()[:12]
+    assert client.get("/api/ledger").json()["safety"]["last_canary_id"] == hashlib.sha256(canary_id.encode()).hexdigest()[:12]
+    assert client.get("/api/personalization").json()["causal_trail"]["last_proposal"]["canary_id"] == hashlib.sha256(canary_id.encode()).hexdigest()[:12]
 
     approve = _action(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": candidate_hash}, engine.current_pointer_version())
     assert approve.status_code == 200, approve.text
