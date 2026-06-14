@@ -1346,6 +1346,9 @@ def _redact(text: Any, request_text: str | None = None) -> str:
     request = str(request_text or "").strip()
     if request:
         redacted = redacted.replace(request, "[redacted]")
+        for token in request.split():
+            if len(token) >= 8:
+                redacted = redacted.replace(token, "[redacted]")
     for pattern in SECRET_PATTERNS:
         redacted = pattern.sub("[redacted]", redacted)
     return redacted
