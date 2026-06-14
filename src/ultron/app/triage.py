@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections import Counter
 import os
 import hashlib
 import json
@@ -10,6 +11,7 @@ import re
 import time
 import uuid
 from typing import Any
+from pydantic import BaseModel, ConfigDict, Field
 
 from ultron.auth.principal import DEFAULT_LOCAL_PRINCIPAL, Principal
 from ultron.composition.resolver import CompositionResolver
@@ -21,6 +23,7 @@ from ultron.evaluation.harness import EvaluationHarness, EvaluationReport, Froze
 from ultron.evolution.loop import EvolutionLoop, StabilityControls
 from ultron.evolution.selection import SelectionOutcome, SelectionThresholds, Selector
 from ultron.evolution.variation import VariationEngine, VariationPrimitive
+from ultron.evolution.planner import PendingVariationApproval, VariationPlanConstraints, VariationPlanner
 from ultron.feedback.channel import ConsentClass, FeedbackChannel, FeedbackEvent, FeedbackEventType, SourceReliability, TimestampSource
 from ultron.feedback.aggregation import FeedbackAggregator, FeedbackSummary, canonical_rating_payload
 from ultron.module.contract import load_default_contract
@@ -52,6 +55,24 @@ PROMOTABLE_EVIDENCE_LABELS = {EvidenceLabel.BENCHMARK, EvidenceLabel.CAUSAL_SUFF
 class PolicyDenied(PermissionError):
     """Raised when a privileged action fails product policy without mutating state."""
 
+
+
+class PersonalizationSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    user_scope: str
+    workflow_fingerprint: str
+    request_class: str
+    n_runs: int
+    n_feedback: int
+    explicit_user_corrections: int
+    explicit_user_acceptances: int
+    mean_rating: float | None = None
+    module_usage: dict[str, int] = Field(default_factory=dict)
+    dominant_evidence_labels: list[EvidenceLabel] = Field(default_factory=list)
+    recent_primitive_hints: list[str] = Field(default_factory=list)
+    redaction: dict[str, Any] = Field(default_factory=dict)
+    summary_hash: str
 
 
 
@@ -102,6 +123,7 @@ class TriageApp:
         self.evaluated_candidates: dict[str, dict[str, Any]] = {}
         self.pending_permission_expansions: list[dict[str, Any]] = []
         self.telemetry = TelemetrySink()
+        self.personalization_planner = VariationPlanner()
 
     @property
     def pointer_key(self) -> tuple[str, str]:
@@ -342,6 +364,26 @@ class TriageApp:
                 ),
             ]
         )
+        personalization_summary = self.build_personalization_summary(run_manifest.user_scope, run_manifest.workflow_fingerprint)
+        components.append(
+            UiComponent(
+                type=ComponentType.PERSONALIZATION_SIGNAL_CARD,
+                region=Region.MAIN,
+                priority=45,
+                props={
+                    "signal_counts": {
+                        "runs": personalization_summary.n_runs,
+                        "feedback": personalization_summary.n_feedback,
+                        "acceptances": personalization_summary.explicit_user_acceptances,
+                        "corrections": personalization_summary.explicit_user_corrections,
+                    },
+                    "evidence_labels": [label.value for label in personalization_summary.dominant_evidence_labels],
+                    "summary_hash": personalization_summary.summary_hash,
+                    "rationale": f"Non-raw personalization summary {personalization_summary.summary_hash[:19]} is available for gated evolution.",
+                },
+                animation=AnimationHint(kind="fade_in", duration_ms=240, delay_ms=160, reduced_motion_fallback="none"),
+            )
+        )
         envelope = InlineGenUiEnvelope(
             envelope_id=f"inline-{run_manifest.run_id[:24]}",
             run_id=run_manifest.run_id,
@@ -397,6 +439,120 @@ class TriageApp:
         if stored.candidate_id:
             self._update_fitness_for_modules([stored.candidate_id], stored.timestamp, feedback_summary=self.feedback_summary(stored.candidate_id))
         return stored
+
+    def build_personalization_summary(self, user_scope: str, workflow_fingerprint: str) -> PersonalizationSummary:
+        self.seed_baseline()
+        scoped_runs = [
+            run for run in self.run_manifests
+            if run.active_module_set_id.startswith(f"{user_scope}:{workflow_fingerprint}:") or run.workflow_fingerprint == workflow_fingerprint
+        ]
+        module_usage: dict[str, int] = {}
+        for run in scoped_runs:
+            for module_hash in run.ordered_module_hashes:
+                try:
+                    module = self.registry.get(module_hash).module
+                except KeyError:
+                    continue
+                module_usage[module.module_id] = min(1000, module_usage.get(module.module_id, 0) + 1)
+        if not module_usage:
+            _, active = self.pointer_store.get((user_scope, workflow_fingerprint))
+            if not active and (user_scope, workflow_fingerprint) != self.pointer_key:
+                _, active = self.pointer_store.get(self.pointer_key)
+            for module_hash in active:
+                try:
+                    module = self.registry.get(module_hash).module
+                except KeyError:
+                    continue
+                module_usage[module.module_id] = min(1000, module.fitness.usage_count)
+        feedback_events = [
+            event for event in self.feedback_channel._events
+            if event.user_scope == user_scope and event.workflow_fingerprint == workflow_fingerprint
+        ]
+        ratings = [_rating_from_schema(event.payload_schema) for event in feedback_events]
+        ratings = [rating for rating in ratings if rating is not None]
+        labels: list[EvidenceLabel] = []
+        primitive_counts: dict[str, int] = {}
+        for entry in self._registry_entries():
+            module = entry.module
+            if workflow_fingerprint not in module.workflow_tags:
+                continue
+            for label in module.fitness.evidence_labels:
+                labels.append(label)
+        for run in scoped_runs[-8:]:
+            if run.variation_primitive_id:
+                primitive_counts[run.variation_primitive_id] = primitive_counts.get(run.variation_primitive_id, 0) + 1
+        dominant = [label for label, _ in sorted(Counter(labels).items(), key=lambda item: (-item[1], item[0].value))[:4]]
+        hints = [name for name, _ in sorted(primitive_counts.items(), key=lambda item: (-item[1], item[0]))[:4]]
+        body = {
+            "user_scope": _stable_hash(user_scope),
+            "workflow_fingerprint": _stable_hash(workflow_fingerprint),
+            "request_class": _stable_hash(workflow_fingerprint),
+            "n_runs": min(1000, len(scoped_runs)),
+            "n_feedback": min(1000, len(feedback_events)),
+            "explicit_user_corrections": min(1000, sum(1 for event in feedback_events if ":-" in event.payload_schema)),
+            "explicit_user_acceptances": min(1000, sum(1 for event in feedback_events if _rating_from_schema(event.payload_schema) is not None and (_rating_from_schema(event.payload_schema) or 0) > 0)),
+            "mean_rating": (round(sum(ratings) / len(ratings), 6) if ratings else None),
+            "module_usage": dict(sorted(module_usage.items())[:8]),
+            "dominant_evidence_labels": dominant,
+            "recent_primitive_hints": hints,
+            "redaction": {"raw_request_text": True, "raw_feedback_comments": True, "secrets": True, "hashed_scope": True},
+        }
+        body["summary_hash"] = _canonical_sha256(body)
+        return PersonalizationSummary.model_validate(body)
+
+    def personalize(self, user_scope: str, workflow_fingerprint: str) -> dict[str, Any] | PendingVariationApproval:
+        summary = self.build_personalization_summary(user_scope, workflow_fingerprint)
+        _, active = self.pointer_store.get((user_scope, workflow_fingerprint))
+        if not active and (user_scope, workflow_fingerprint) != self.pointer_key:
+            _, active = self.pointer_store.get(self.pointer_key)
+        parent_hash = active[-1]
+        parent = self.registry.get(parent_hash).module
+        constraints = VariationPlanConstraints(
+            max_variants=1,
+            existing_variants=0,
+            indicated_tools=["write"] if summary.explicit_user_corrections >= 3 and summary.mean_rating is not None and summary.mean_rating < 0 else [],
+        )
+        feedback_summary = FeedbackSummary(
+            candidate_hash=parent_hash,
+            n_events=summary.n_feedback,
+            explicit_user_corrections=summary.explicit_user_corrections,
+            explicit_user_acceptances=summary.explicit_user_acceptances,
+            mean_rating=summary.mean_rating,
+            preference_signal=summary.n_feedback > 0,
+            evidence_label=EvidenceLabel.PREFERENCE if summary.n_feedback > 0 else EvidenceLabel.INSUFFICIENT,
+        )
+        planned = self.personalization_planner.plan(parent, feedback_summary, {"primary_metric": summary.mean_rating or 0.0}, constraints)
+        if isinstance(planned, PendingVariationApproval):
+            return planned
+        proposal = self._summary_personalization_proposal(parent, summary, planned)
+        candidate = self.variation_engine.apply(proposal)
+        candidate_hash = candidate.content_hash or ""
+        canary_id = f"canary-{candidate_hash[:12]}"
+        self.evolution_loop.register_candidate(candidate_hash)
+        self.canary_store.write(canary_id, "adapter_state", "candidate_hash", candidate_hash)
+        self.rollback_controller.track_pointer_candidate(
+            canary_id,
+            (user_scope, workflow_fingerprint),
+            self.pointer_store.get((user_scope, workflow_fingerprint))[0],
+            active,
+            list(active) + [candidate_hash],
+            run_id="personalization-canary-pointer",
+            module_set_hash=candidate_hash,
+        )
+        self.last_candidate_hash = candidate_hash
+        self.last_canary_id = canary_id
+        return {"summary": summary, "proposal": proposal, "candidate": candidate, "canary_id": canary_id, "promotable": self.has_promotable_evidence(candidate_hash)}
+
+    def _summary_personalization_proposal(self, parent: HarnessModule, summary: PersonalizationSummary, planned: Any) -> Any:
+        panels = list(parent.surfaces.ui_panels)
+        if panels:
+            index = summary.n_runs % len(panels)
+            panel = panels[index]
+            rationale = f"summary:{summary.summary_hash[:12]} runs={summary.n_runs} feedback={summary.n_feedback} panel_index={index}"
+            return planned.model_copy(update={"primitive": VariationPrimitive.UI_PANEL_PRIORITY, "change": {"ui_panel_contract_hash": panel}, "rationale": rationale})
+        max_tool_calls = int((parent.surfaces.budget or {}).get("max_tool_calls", 1))
+        rationale = f"summary:{summary.summary_hash[:12]} runs={summary.n_runs} feedback={summary.n_feedback} budget_tighten"
+        return planned.model_copy(update={"primitive": VariationPrimitive.BUDGET_TIGHTEN, "change": {"budget": {"max_tool_calls": max(1, max_tool_calls - 1)}}, "rationale": rationale})
 
     def propose_and_canary(self, primitive: VariationPrimitive | str, change: dict[str, Any], request_text: str = "candidate triage") -> dict[str, Any]:
         self.seed_baseline()
@@ -983,6 +1139,21 @@ class TriageApp:
 
 def _short_hash(value: str | None) -> str | None:
     return value[:12] if value else None
+
+def _stable_hash(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _canonical_sha256(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=lambda item: item.value if hasattr(item, "value") else str(item)).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _rating_from_schema(schema: str) -> int | None:
+    try:
+        return int(str(schema).rsplit(":", 1)[-1])
+    except ValueError:
+        return None
 
 def _deterministic_decay_score(primary_metric: float | None, feedback_summary: FeedbackSummary | None = None) -> float:
     feedback_penalty = 0.0
