@@ -20,7 +20,7 @@ MVP_TYPES = {
 
 def test_build_inline_genui_envelope_validated_bounded_and_redacted():
     app = TriageApp()
-    raw_request = "Fix <script>alert('x')</script> flaky tests with a very specific raw request sentinel"
+    raw_request = "Fix ghp_FAKESECRET123456 sk-FAKESECRET123456 user@example.com flaky tests with a very specific raw request sentinel"
     run = app.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, raw_request)
     canary = app.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": "candidate-good"}, raw_request)
 
@@ -38,7 +38,11 @@ def test_build_inline_genui_envelope_validated_bounded_and_redacted():
     assert raw_request not in encoded
     assert "raw request sentinel" not in encoded
     assert run["adapter_result"].model_dump_json() not in encoded
-    assert envelope.redaction == {"request_text": True, "adapter_blob": True, "secrets": True}
+    assert "ghp_FAKESECRET123456" not in encoded
+    assert "sk-FAKESECRET123456" not in encoded
+    assert "user@example.com" not in encoded
+    assert "[redacted]" in encoded
+    assert envelope.redaction == {"request_text": True, "adapter_blob": True, "secrets": True, "applied": True}
 
 
 def test_malicious_request_not_rendered_as_html_props_and_envelope_validates():
@@ -65,3 +69,5 @@ def test_chat_js_renderer_parity_textcontent_only_and_animation_allowlist():
     assert "eval(" not in source
     assert "new Function" not in source
     assert ".style" not in source
+    assert "withActivePointerVersion" in source
+    assert "active_pointer_version" in source

@@ -6,6 +6,7 @@ import copy
 import os
 import hashlib
 import json
+import re
 import time
 import uuid
 from typing import Any
@@ -226,7 +227,7 @@ class TriageApp:
         self.run_manifests.append(run_manifest.model_copy(deep=True))
         self.telemetry.increment("runs_started", event="run_started", subject=actor)
         self.last_ui_spec = ui_spec
-        return {"run_result": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec}
+        return {"run_result": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec, "request_text": request_text}
 
     def build_inline_genui_envelope(self, run: dict[str, Any], canary: dict[str, Any]) -> InlineGenUiEnvelope:
         raw_manifest = run["run_manifest"]
@@ -234,6 +235,7 @@ class TriageApp:
         run_manifest = raw_manifest if hasattr(raw_manifest, "verify") else RunManifest.model_validate(raw_manifest)
         adapter_result = raw_adapter_result if hasattr(raw_adapter_result, "output") and hasattr(raw_adapter_result, "trajectory_id") else AdapterRunResult.model_validate(raw_adapter_result)
         output = adapter_result.output
+        request_text = str(run.get("request_text") or "")
         ui_spec = UiSpec.model_validate(run.get("ui_spec") or self.last_ui_spec or self.current_uispec())
         candidate = canary["candidate"]
         proposal = canary.get("proposal")
@@ -243,7 +245,7 @@ class TriageApp:
         report = candidate_eval.get("report")
         manifest_hash = _short_hash(run_manifest.active_module_set_hash) or "manifest"
         trajectory_id = str(run_manifest.model_snapshot.get("trajectory_id") or adapter_result.trajectory_id or "trajectory")
-        summary_lines = [_bounded_summary_line(output.get("plan")), _bounded_summary_line(output.get("risk")), _bounded_summary_line(output.get("tests"))]
+        summary_lines = [_redacted_summary_line(output.get("plan"), request_text), _redacted_summary_line(output.get("risk"), request_text), _redacted_summary_line(output.get("tests"), request_text)]
         pending_permissions = len(self.pending_permission_expansions)
         rollback_state = RollbackState.READY if canary_id and self.canary_active(canary_id) else RollbackState.UNAVAILABLE
         no_poisoning_ok = _canary_no_poisoning_ok(self, canary_id)
@@ -284,7 +286,7 @@ class TriageApp:
                     props={
                         "tool": tool,
                         "status": ToolStatus.SUCCEEDED,
-                        "output_summary": [_bounded_summary_line(text)],
+                        "output_summary": [_redacted_summary_line(text, request_text)],
                         "output_redacted": True,
                         "secrets_redacted": True,
                     },
@@ -302,7 +304,7 @@ class TriageApp:
                         "candidate_hash": _short_hash(candidate_hash) or "candidate",
                         "primitive": str(getattr(getattr(proposal, "primitive", "PROMPT_SLOT_EDIT"), "value", getattr(proposal, "primitive", "PROMPT_SLOT_EDIT"))),
                         "lifecycle": HarnessLifecycle.CANDIDATE,
-                        "rationale": _bounded_summary_line(getattr(proposal, "rationale", "Candidate harness canary created from trusted server-side run output."), max_length=240),
+                        "rationale": _redacted_summary_line(getattr(proposal, "rationale", "Candidate harness canary created from trusted server-side run output."), request_text, max_length=240),
                         "canary_id": canary_id,
                     },
                     animation=AnimationHint(kind="slide_up", duration_ms=280, delay_ms=100, reduced_motion_fallback="fade_in"),
@@ -312,9 +314,9 @@ class TriageApp:
                     region=Region.MAIN,
                     priority=30,
                     props={
-                        "provenance": _bounded_summary_line(getattr(report, "provenance", None) or "pending benchmark", max_length=120),
+                        "provenance": _redacted_summary_line(getattr(report, "provenance", None) or "pending benchmark", request_text, max_length=120),
                         "promotable": self.has_promotable_evidence(candidate_hash),
-                        "evidence_label": _bounded_summary_line(getattr(getattr(report, "evidence_label", None), "value", getattr(report, "evidence_label", "pending")), max_length=80),
+                        "evidence_label": _redacted_summary_line(getattr(getattr(report, "evidence_label", None), "value", getattr(report, "evidence_label", "pending")), request_text, max_length=80),
                         "paired_tasks": int(getattr(report, "paired_tasks", 0) or 0),
                     },
                     animation=AnimationHint(kind="fade_in", duration_ms=240, delay_ms=125, reduced_motion_fallback="none"),
@@ -355,13 +357,14 @@ class TriageApp:
                 "manifest": run_manifest.active_module_set_hash,
                 "candidate": candidate_hash,
                 "ui": ui_spec.spec_hash or "pending",
+                "active_pointer_version": str(self.current_pointer_version()),
             },
-            redaction={"request_text": True, "adapter_blob": True, "secrets": True},
+            redaction={"request_text": True, "adapter_blob": True, "secrets": True, "applied": True},
             created_at=time.time(),
         )
         return envelope.finalized(self.ui_registry)
 
-    def submit_feedback(self, run_id: str, rating: int = 1, comment: str = "") -> FeedbackEvent:
+    def submit_feedback(self, run_id: str, rating: int = 1, comment: str = "", actor: str | None = None) -> FeedbackEvent:
         payload = canonical_rating_payload(rating, comment)
         payload_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         consent_class = ConsentClass.PRODUCT_IMPROVEMENT
@@ -390,7 +393,7 @@ class TriageApp:
             payload_schema=f"rating:v1:{payload['rating']}",
         )
         stored = self.feedback_channel.ingest(event)
-        self._append_ledger(run_id, self.last_manifest.active_module_set_hash if self.last_manifest else "feedback", None, None, SideEffectKind.FEEDBACK_EVENT, stored.model_dump(mode="json"))
+        self._append_ledger(run_id, self.last_manifest.active_module_set_hash if self.last_manifest else "feedback", None, None, SideEffectKind.FEEDBACK_EVENT, stored.model_dump(mode="json"), actor=actor)
         if stored.candidate_id:
             self._update_fitness_for_modules([stored.candidate_id], stored.timestamp, feedback_summary=self.feedback_summary(stored.candidate_id))
         return stored
@@ -1057,6 +1060,30 @@ def _build_durable_triage_app(db_path: str, *, signer: ManifestSigner) -> Triage
     app.manifest_signer = signer
     return app
 
+
+SECRET_PATTERNS = [
+    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"\bghp_[A-Za-z0-9_]{8,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{8,}\b"),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b", re.IGNORECASE),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\b[A-Fa-f0-9]{32,}\b"),
+    re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+]
+
+
+def _redact(text: Any, request_text: str | None = None) -> str:
+    redacted = str(text or "No summary available")
+    request = str(request_text or "").strip()
+    if request:
+        redacted = redacted.replace(request, "[redacted]")
+    for pattern in SECRET_PATTERNS:
+        redacted = pattern.sub("[redacted]", redacted)
+    return redacted
+
+
+def _redacted_summary_line(value: Any, request_text: str | None = None, max_length: int = 180) -> str:
+    return _bounded_summary_line(_redact(value, request_text), max_length=max_length)
 
 def _bounded_summary_line(value: Any, max_length: int = 180) -> str:
     if isinstance(value, list):

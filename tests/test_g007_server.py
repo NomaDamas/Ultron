@@ -18,6 +18,13 @@ def _authed(client):
     return root.cookies["ultron_csrf"]
 
 
+def _user_action(client, csrf, action_type, payload):
+    return client.post(
+        "/api/action",
+        headers={"X-CSRF-Token": csrf},
+        json={"type": action_type, "payload": payload, "csrf_token": csrf},
+    )
+
 def _privileged(client, csrf, action_type, payload, pointer_version=None):
     version = client.app.state.triage.current_pointer_version() if pointer_version is None else pointer_version
     return client.post(
@@ -96,7 +103,7 @@ def test_unknown_approve_promotion_denies_without_polluting_pointer_and_requests
     assert "policy" in denied.json()["detail"]
     assert engine.pointer_store.get(engine.pointer_key) == (before_version, before_active)
 
-    submitted = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "after deadbeef"}})
+    submitted = _user_action(client, csrf, "SUBMIT_REQUEST", {"request_text": "after deadbeef"})
     assert submitted.status_code == 200
     assert submitted.json()["result"]["run_manifest"]["signature"]
 
@@ -130,7 +137,7 @@ def test_submit_request_benchmark_then_approve_promotion_advances_pointer():
     engine = client.app.state.triage
     before = engine.current_pointer_version()
 
-    submitted = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "triage server"}})
+    submitted = _user_action(client, csrf, "SUBMIT_REQUEST", {"request_text": "triage server"})
     assert submitted.status_code == 200
     body = submitted.json()
     assert body["result"]["run_manifest"]["signature"]
@@ -141,6 +148,8 @@ def test_submit_request_benchmark_then_approve_promotion_advances_pointer():
     assert envelope["provenance"]["run"] == envelope["run_id"]
     assert envelope["components"]
     assert envelope["redaction"]["request_text"] is True
+    assert envelope["redaction"]["applied"] is True
+    assert envelope["provenance"]["active_pointer_version"] == str(before)
     benchmarked = _privileged(client, csrf, "RUN_BENCHMARK", {"candidate_hash": candidate_hash, "canary_id": body["canary_id"]})
     assert benchmarked.status_code == 200
     assert benchmarked.json()["evaluation"]["report"]["promotable"] is True
@@ -157,13 +166,39 @@ def test_submit_request_benchmark_then_approve_promotion_advances_pointer():
 def test_submit_request_and_stale_privileged_rejected():
     client = _client()
     csrf = _authed(client)
-    submitted = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "triage server"}})
+    submitted = _user_action(client, csrf, "SUBMIT_REQUEST", {"request_text": "triage server"})
     assert submitted.status_code == 200
     candidate_hash = submitted.json()["candidate"]["content_hash"]
     stale = _privileged(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": candidate_hash}, 0)
     assert stale.status_code == 403
 
 
+
+def test_submit_request_and_give_feedback_require_session_csrf_and_record_actor():
+    client = _client()
+    missing_session = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "auth gate"}})
+    assert missing_session.status_code == 401
+
+    csrf = _authed(client)
+    missing_csrf = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "auth gate"}})
+    assert missing_csrf.status_code == 403
+
+    submitted = _user_action(client, csrf, "SUBMIT_REQUEST", {"request_text": "auth gate"})
+    assert submitted.status_code == 200
+    assert submitted.json()["result"]["run_manifest"]["actor"] == "local-operator"
+    run_id = submitted.json()["result"]["run_manifest"]["run_id"]
+    run_entries = client.app.state.triage.ledger.entries_for_run(run_id)
+    assert run_entries and {entry.actor for entry in run_entries} == {"local-operator"}
+
+    no_feedback_session = _client().post("/api/action", json={"type": "GIVE_FEEDBACK", "payload": {"run_id": run_id, "rating": 1}})
+    assert no_feedback_session.status_code == 401
+    no_feedback_csrf = client.post("/api/action", json={"type": "GIVE_FEEDBACK", "payload": {"run_id": run_id, "rating": 1}})
+    assert no_feedback_csrf.status_code == 403
+
+    feedback = _user_action(client, csrf, "GIVE_FEEDBACK", {"run_id": run_id, "rating": 1, "comment": "keep"})
+    assert feedback.status_code == 200
+    feedback_entries = [entry for entry in client.app.state.triage.ledger.entries_for_run(run_id) if entry.kind.value == "FEEDBACK_EVENT"]
+    assert feedback_entries and feedback_entries[-1].actor == "local-operator"
 def test_rollback_canary_policy_denies_missing_and_allows_active_canary():
     client = _client()
     csrf = _authed(client)

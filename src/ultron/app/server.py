@@ -31,6 +31,9 @@ ACTION_SCOPES = {
     ActionType.REQUEST_PERMISSION_EXPANSION: Scope.REQUEST_PERMISSION_EXPANSION,
     ActionType.RUN_BENCHMARK: Scope.RUN_BENCHMARK,
 }
+MUTATING_USER_ACTIONS = {ActionType.SUBMIT_REQUEST, ActionType.GIVE_FEEDBACK}
+
+
 
 
 def create_app() -> FastAPI:
@@ -138,6 +141,13 @@ def create_app() -> FastAPI:
             if not principal.has_scope(required_scope):
                 engine.telemetry.increment("auth_failures", event="missing_scope", subject=principal.subject)
                 raise HTTPException(status_code=403, detail=f"privileged action requires scope {required_scope.value}")
+        if cmd.type in MUTATING_USER_ACTIONS:
+            if principal is None:
+                engine.telemetry.increment("auth_failures", event="missing_or_expired_session")
+                raise HTTPException(status_code=401, detail="mutating action requires authenticated session")
+            if not csrf_ok:
+                engine.telemetry.increment("auth_failures", event="invalid_csrf", subject=principal.subject)
+                raise HTTPException(status_code=403, detail="mutating action requires a valid CSRF token")
         policy_ok = _policy_ok(engine, cmd)
         try:
             validate_action(
@@ -175,7 +185,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             return _jsonable({"ok": True, "evaluation": evaluation})
         if cmd.type is ActionType.GIVE_FEEDBACK:
-            event = engine.submit_feedback(str(cmd.payload.get("run_id", engine.last_manifest.run_id if engine.last_manifest else "run")), int(cmd.payload.get("rating", 1)), str(cmd.payload.get("comment", "")))
+            event = engine.submit_feedback(str(cmd.payload.get("run_id", engine.last_manifest.run_id if engine.last_manifest else "run")), int(cmd.payload.get("rating", 1)), str(cmd.payload.get("comment", "")), actor=principal.subject if principal else None)
             return _jsonable({"ok": True, "feedback": event})
         if cmd.type is ActionType.APPROVE_PROMOTION:
             candidate_hash = str(cmd.payload.get("candidate_hash") or "")

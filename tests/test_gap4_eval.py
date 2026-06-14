@@ -90,7 +90,7 @@ def test_guardrails_from_adapter_block_promotable_candidate():
 def test_submit_request_does_not_create_evidence_and_benchmark_required_for_approval():
     client = TestClient(create_app())
     csrf = client.get("/").cookies["ultron_csrf"]
-    submitted = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "triage"}})
+    submitted = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "triage"}, "csrf_token": csrf})
     assert submitted.status_code == 200
     body = submitted.json()
     assert "evaluation" not in body

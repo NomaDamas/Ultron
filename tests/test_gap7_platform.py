@@ -57,14 +57,17 @@ def test_auth_session_expiry_scope_gate_and_secure_cookie_attrs():
     assert denied.status_code == 403
     assert "scope" in denied.json()["detail"]
 
-    allowed = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "unprivileged still allowed"}})
-    assert allowed.status_code == 200
+    stale_session = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "unprivileged still requires auth"}})
+    assert stale_session.status_code == 403
+    fresh_client = TestClient(create_app())
+    missing_session = fresh_client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "unprivileged still requires auth"}})
+    assert missing_session.status_code == 401
 
 
 def test_actor_audit_in_memory_and_durable_promote_restore(tmp_path):
     client = TestClient(create_app())
     csrf = _csrf(client)
-    submitted = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "actor audit"}})
+    submitted = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "actor audit"}, "csrf_token": csrf})
     candidate_hash = submitted.json()["candidate"]["content_hash"]
     canary_id = submitted.json()["canary_id"]
     assert _privileged(client, csrf, "ROLLBACK_CANARY", {"canary_id": canary_id}).status_code == 200
@@ -93,7 +96,7 @@ def test_actor_audit_in_memory_and_durable_promote_restore(tmp_path):
 def test_metrics_counters_and_no_secret_fields():
     client = TestClient(create_app())
     csrf = _csrf(client)
-    submitted = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "metrics"}})
+    submitted = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "metrics"}, "csrf_token": csrf})
     body = submitted.json()
     no_csrf = client.post("/api/action", json={"type": "RUN_BENCHMARK", "payload": {"candidate_hash": body["candidate"]["content_hash"], "canary_id": body["canary_id"]}})
     assert no_csrf.status_code == 403

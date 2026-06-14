@@ -143,7 +143,7 @@ def test_no_fabricated_submit_metrics_and_promotion_requires_real_benchmark() ->
     csrf = client.get("/").cookies["ultron_csrf"]
     initial_pointer = client.app.state.triage.pointer_store.get(client.app.state.triage.pointer_key)
 
-    submitted = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "triage this"}})
+    submitted = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "triage this"}, "csrf_token": csrf})
     assert submitted.status_code == 200
     submitted_body = submitted.json()
     assert "evaluation" not in submitted_body

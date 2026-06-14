@@ -144,8 +144,9 @@ def test_api_actor_audit_for_benchmark_promotion_and_rollback():
 
     submit = client.post(
         "/api/action",
-        json={"type": ActionType.SUBMIT_REQUEST.value, "payload": {"request_text": "gap7 actor audit"}},
+        json={"type": ActionType.SUBMIT_REQUEST.value, "payload": {"request_text": "gap7 actor audit"}, "csrf_token": csrf},
         cookies={"ultron_session": session},
+        headers={"X-CSRF-Token": csrf},
     )
     assert submit.status_code == 200
     candidate_hash = submit.json()["candidate"]["content_hash"]

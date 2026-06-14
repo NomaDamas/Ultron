@@ -156,7 +156,8 @@ def test_fail_closed_live_dependencies_and_server_503(monkeypatch, tmp_path):
     from ultron.app.server import create_app
 
     client = TestClient(create_app())
-    response = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "live missing deps"}})
+    csrf = _authed(client)
+    response = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "live missing deps"}, "csrf_token": csrf})
     assert response.status_code == 503
     assert "hermes-agent not installed" in response.json()["detail"]
     assert client.app.state.triage.last_manifest is None
@@ -268,7 +269,7 @@ def test_model_api_key_never_appears_in_metrics_telemetry_or_live_errors(monkeyp
 
     client = TestClient(create_app())
     csrf = _authed(client)
-    submit = client.post("/api/action", json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "key safety"}})
+    submit = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "key safety"}, "csrf_token": csrf})
     metrics = client.get("/api/metrics")
     privileged = _privileged(client, csrf, "APPROVE_PROMOTION", {"candidate_hash": "missing"})
 

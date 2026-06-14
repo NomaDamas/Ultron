@@ -1,4 +1,4 @@
-const state = { csrfCookieName: 'ultron_csrf', lastRunId: null };
+const state = { csrfCookieName: 'ultron_csrf', lastRunId: null, activePointerVersion: null };
 const ANIMATION_CLASS = {
   none: '',
   fade_in: 'anim-fade-in',
@@ -97,7 +97,7 @@ async function submitRequest(requestText) {
 
 async function sendAction(type, payload) {
   const csrf = cookieValue(state.csrfCookieName);
-  const command = { type, payload: payload || {}, csrf_token: csrf };
+  const command = { type, payload: payload || {}, csrf_token: csrf, active_pointer_version: payload?.active_pointer_version };
   try {
     const response = await fetch('/api/action', {
       method: 'POST',
@@ -121,6 +121,7 @@ function appendAgentTurn(data) {
   const turn = el('article', 'turn agent-turn');
   const manifest = result.run_manifest || {};
   state.lastRunId = data.envelope?.run_id || manifest.run_id || state.lastRunId;
+  state.activePointerVersion = data.envelope?.provenance?.active_pointer_version ?? state.activePointerVersion;
   turn.append(el('p', 'bubble agent-bubble', 'I ran the request and generated an inline control surface for the resulting plan, risk, tests, and evidence.'));
   const cards = el('div', 'cards');
   if (data.envelope) renderInlineEnvelope(cards, data.envelope, data);
@@ -196,7 +197,7 @@ function renderHarnessEvolutionCard(props, _component, context) {
 function renderEvidenceStatusCard(props, _component, context) {
   const section = card('Evidence status', props);
   const controls = el('div', 'feedback-controls');
-  controls.append(actionButton('Run benchmark', 'RUN_BENCHMARK', { candidate_hash: context.envelope?.candidate_hash, canary_id: context.envelope?.canary_id }));
+  controls.append(actionButton('Run benchmark', 'RUN_BENCHMARK', withActivePointerVersion({ candidate_hash: context.envelope?.candidate_hash, canary_id: context.envelope?.canary_id })));
   section.append(controls);
   return section;
 }
@@ -210,8 +211,8 @@ function renderSafetyStatusCard(props, _component, context) {
   const controls = el('div', 'feedback-controls');
   const actions = Array.isArray(props.gated_actions) ? props.gated_actions : [];
   for (const type of actions) {
-    if (type === 'APPROVE_PROMOTION') controls.append(actionButton('Approve promotion', type, { candidate_hash: context.envelope?.candidate_hash }));
-    if (type === 'ROLLBACK_CANARY') controls.append(actionButton('Rollback canary', type, { canary_id: context.envelope?.canary_id }));
+    if (type === 'APPROVE_PROMOTION') controls.append(actionButton('Approve promotion', type, withActivePointerVersion({ candidate_hash: context.envelope?.candidate_hash })));
+    if (type === 'ROLLBACK_CANARY') controls.append(actionButton('Rollback canary', type, withActivePointerVersion({ canary_id: context.envelope?.canary_id })));
   }
   if (controls.childNodes.length) section.append(controls);
   return section;
@@ -234,6 +235,10 @@ function appendList(parent, lines) {
   const list = el('ul', 'summary-list');
   for (const line of lines) list.append(el('li', null, line));
   parent.append(list);
+}
+
+function withActivePointerVersion(payload) {
+  return { ...(payload || {}), active_pointer_version: state.activePointerVersion };
 }
 
 function actionButton(label, type, payload) {
