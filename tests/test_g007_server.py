@@ -27,15 +27,29 @@ def _privileged(client, csrf, action_type, payload, pointer_version=None):
     )
 
 
-def test_get_root_sets_csp_tokens_and_uses_external_script():
+def test_get_root_sets_csp_tokens_and_uses_external_assets_without_inline_code():
     client = _client()
     response = client.get("/")
     assert response.status_code == 200
     assert "default-src 'self'" in response.headers["content-security-policy"]
+    assert "style-src 'self'" in response.headers["content-security-policy"]
     assert "ultron_session" in response.cookies
     assert "ultron_csrf" in response.cookies
+    assert '<link rel="stylesheet" href="/static/app.css">' in response.text
     assert '<script src="/static/app.js"></script>' in response.text
     assert "<script>" not in response.text
+    assert "style=" not in response.text
+    assert "<style" not in response.text
+
+
+def test_static_frontend_assets_are_served():
+    client = _client()
+    css = client.get("/static/app.css")
+    js = client.get("/static/app.js")
+    assert css.status_code == 200
+    assert "text/css" in css.headers["content-type"]
+    assert js.status_code == 200
+    assert "javascript" in js.headers["content-type"]
 
 
 def test_get_uispec_returns_valid_spec():

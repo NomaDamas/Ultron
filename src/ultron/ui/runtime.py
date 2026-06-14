@@ -22,6 +22,12 @@ class ComponentType(StrEnum):
     INTAKE_PANEL = "INTAKE_PANEL"
     CONTEXT_PANEL = "CONTEXT_PANEL"
 
+class Region(StrEnum):
+    SIDEBAR = "sidebar"
+    MAIN = "main"
+    DETAILS = "details"
+    ACTIONS = "actions"
+
 
 class ActionType(StrEnum):
     SUBMIT_REQUEST = "SUBMIT_REQUEST"
@@ -46,7 +52,7 @@ class UiComponent(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
     type: ComponentType
-    region: str
+    region: Region
     priority: int
     props: dict[str, Any] = Field(default_factory=dict)
     telemetry_schema: list[str] = Field(default_factory=list)
@@ -147,11 +153,11 @@ def _panel_priority(panel: str, fallback: int = 0) -> int:
         return fallback
 
 
-def _panel_region(component_type: ComponentType) -> str:
+def _panel_region(component_type: ComponentType) -> Region:
     if component_type in {ComponentType.APPROVAL_PANEL, ComponentType.ROLLBACK_PANEL}:
-        return "actions"
+        return Region.ACTIONS
     if component_type in {ComponentType.TRACE_PANEL, ComponentType.MUTATION_DIFF_PANEL}:
-        return "details"
+        return Region.DETAILS
     if component_type in {ComponentType.INTAKE_PANEL, ComponentType.CONTEXT_PANEL}:
-        return "sidebar"
-    return "main"
+        return Region.SIDEBAR
+    return Region.MAIN

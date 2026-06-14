@@ -64,6 +64,19 @@ def test_generated_uispec_unknown_component_is_rejected_by_server_registry():
         validate_generated_uispec(malicious, {ComponentType.INTAKE_PANEL})
 
 
+def test_generated_uispec_region_is_constrained_by_server_validation():
+    app = TriageApp()
+    safe = UiSpec(components=[UiComponent(type=ComponentType.INTAKE_PANEL, region="sidebar", priority=0)])
+
+    validated = validate_generated_uispec(safe, app.ui_registry)
+
+    assert validated.components[0].region == "sidebar"
+    with pytest.raises(ValueError):
+        validate_generated_uispec(
+            {"components": [{"type": "INTAKE_PANEL", "region": "main\"] .bad", "priority": 0}]},
+            app.ui_registry,
+        )
+
 def _synthesis_context(app, *, allowed_tools=None):
     parent = app.seed_baseline()
     allowed = parent.surfaces.model_copy(update={"tools": allowed_tools if allowed_tools is not None else list(parent.surfaces.tools)})

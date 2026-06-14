@@ -65,7 +65,7 @@ def create_app() -> FastAPI:
         response.set_cookie("ultron_csrf", csrf_token, httponly=False, samesite="strict", secure=session_store.secure_cookies)
         return """<!doctype html>
 <html lang=\"en\">
-<head><meta charset=\"utf-8\"><title>Ultron Triage</title></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Ultron Triage</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>
   <main id=\"app\" data-csrf-cookie=\"ultron_csrf\">Loading Ultron triage...</main>
   <script src=\"/static/app.js\"></script>
