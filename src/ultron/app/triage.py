@@ -97,6 +97,7 @@ class TriageApp:
         self.last_ui_spec: UiSpec | None = None
         self.last_candidate_hash: str | None = None
         self.last_canary_id: str | None = None
+        self.run_manifests: list[RunManifest] = []
         self.evaluated_candidates: dict[str, dict[str, Any]] = {}
         self.pending_permission_expansions: list[dict[str, Any]] = []
         self.telemetry = TelemetrySink()
@@ -222,6 +223,7 @@ class TriageApp:
             self._append_ledger(run_manifest.run_id, manifest.manifest_hash or "", module_hash, None, SideEffectKind.ADAPTER_STATE, result_payload, actor=actor)
         self._update_fitness_for_modules(manifest.ordered_module_hashes, run_manifest.created_at)
         self.last_manifest = run_manifest
+        self.run_manifests.append(run_manifest.model_copy(deep=True))
         self.telemetry.increment("runs_started", event="run_started", subject=actor)
         self.last_ui_spec = ui_spec
         return {"run_result": result_payload["output"], "adapter_result": result, "run_manifest": run_manifest, "ui_spec": ui_spec}
@@ -502,6 +504,121 @@ class TriageApp:
         self.last_canary_id = canary_id
         return {"candidate": candidate, "canary_id": canary_id, "registered": True, "promotable": self.has_promotable_evidence(candidate_hash)}
 
+    def active_modules(self) -> list[dict[str, Any]]:
+        _, active = self.pointer_store.get(self.pointer_key)
+        modules: list[dict[str, Any]] = []
+        for module_hash in active:
+            entry = self.registry.get(module_hash)
+            modules.append(self._toolbelt_module(entry.module))
+        return modules
+
+    def modules_by_lifecycle(self) -> dict[str, list[dict[str, Any]]]:
+        lifecycle_names = [item.value.lower() for item in ModuleLifecycle]
+        grouped: dict[str, list[dict[str, Any]]] = {name: [] for name in lifecycle_names}
+        for entry in self._registry_entries():
+            grouped[entry.lifecycle.value.lower()].append(self._ecology_module(entry.module))
+        for modules in grouped.values():
+            modules.sort(key=lambda item: (item["module_id"], item["version"], item["content_hash"]))
+        return grouped
+
+    def lineage_view(self) -> list[dict[str, str | None]]:
+        return [
+            {"parent_id": entry.module.parent_id, "child_id": entry.module.content_hash, "module_id": entry.module.module_id}
+            for entry in self._registry_entries()
+            if entry.module.parent_id is not None
+        ]
+
+    def recent_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        runs = self.run_manifests[-max(0, limit):]
+        return [self._run_summary(run) for run in reversed(runs)]
+
+    def recent_ledger(self, limit: int = 20) -> list[dict[str, Any]]:
+        entries = self._ledger_entries()[-max(0, limit):]
+        return [self._ledger_summary(entry) for entry in reversed(entries)]
+
+    def safety_status(self) -> dict[str, Any]:
+        return {
+            "pending_permission_expansions": [self._safe_permission_request(request) for request in self.pending_permission_expansions],
+            "last_canary_id": self.last_canary_id,
+            "last_candidate_hash": _short_hash(self.last_candidate_hash),
+            "active_pointer_version": self.current_pointer_version(),
+        }
+
+    def _registry_entries(self) -> list[Any]:
+        if isinstance(self.registry, SqliteModuleRegistry):
+            rows = self.registry.db.conn.execute("SELECT content_hash FROM modules ORDER BY version, content_hash").fetchall()
+            return [self.registry.get(row["content_hash"]) for row in rows]
+        return [entry.model_copy(deep=True) for entry in self.registry._entries.values()]
+
+    def _ledger_entries(self) -> list[LedgerEntry]:
+        if isinstance(self.ledger, SqliteSideEffectLedger):
+            quarantined = self.ledger._quarantined_entry_ids()
+            rows = self.ledger.db.conn.execute("SELECT * FROM ledger ORDER BY created_at, entry_id").fetchall()
+            return [self.ledger._from_row(row, row["entry_id"] in quarantined).model_copy(deep=True) for row in rows]
+        quarantined = self.ledger._quarantined_entry_ids()
+        return [entry.model_copy(update={"quarantined": entry.entry_id in quarantined}, deep=True) for entry in self.ledger._entries if entry.kind is not SideEffectKind.QUARANTINE]
+
+    def _toolbelt_module(self, module: HarnessModule) -> dict[str, Any]:
+        return {
+            "name": module.name,
+            "module_id": module.module_id,
+            "version": module.version,
+            "target_lens": module.target_lens.value,
+            "workflow_tags": list(module.workflow_tags),
+            "fitness": {
+                "usage_count": module.fitness.usage_count,
+                "promotion_state": module.fitness.promotion_state.value,
+                "primary_metric": module.fitness.primary_metric,
+            },
+        }
+
+    def _ecology_module(self, module: HarnessModule) -> dict[str, Any]:
+        return {
+            "module_id": module.module_id,
+            "version": module.version,
+            "content_hash": _short_hash(module.content_hash),
+            "parent_id": module.parent_id,
+            "fitness": {
+                "usage_count": module.fitness.usage_count,
+                "promotion_state": module.fitness.promotion_state.value,
+                "primary_metric": module.fitness.primary_metric,
+                "decay_score": module.fitness.decay_score,
+            },
+        }
+
+    def _run_summary(self, manifest: RunManifest) -> dict[str, Any]:
+        return {
+            "run_id": manifest.run_id,
+            "workflow": manifest.workflow_fingerprint,
+            "active_module_set_hash": _short_hash(manifest.active_module_set_hash),
+            "model_snapshot": {
+                "provider": manifest.model_snapshot.get("provider"),
+                "name": manifest.model_snapshot.get("name"),
+            },
+            "created_at": manifest.created_at,
+            "trajectory_id": manifest.model_snapshot.get("trajectory_id"),
+        }
+
+    def _ledger_summary(self, entry: LedgerEntry) -> dict[str, Any]:
+        return {
+            "entry_id": entry.entry_id,
+            "kind": entry.kind.value,
+            "module_hash": _short_hash(entry.module_hash),
+            "canary_id": entry.canary_id,
+            "actor": entry.actor,
+            "created_at": entry.created_at,
+            "quarantined": entry.quarantined,
+        }
+
+    def _safe_permission_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(request.get("payload", {}))
+        return {
+            "request_id": request.get("request_id"),
+            "status": request.get("status"),
+            "tool": payload.get("tool"),
+            "reason": payload.get("reason"),
+        }
+
     def canary_active(self, canary_id: str) -> bool:
         return bool(canary_id and self.canary_store.read(canary_id, "adapter_state", "candidate_hash"))
 
@@ -727,6 +844,9 @@ class TriageApp:
     def _append_ledger(self, run_id: str, module_set_hash: str, module_hash: str | None, canary_id: str | None, kind: SideEffectKind, payload: dict[str, Any], actor: str | None = None) -> None:
         self.ledger.append(LedgerEntry(run_id=run_id, module_set_hash=module_set_hash, module_hash=module_hash, canary_id=canary_id, kind=kind, payload=payload, actor=actor))
 
+
+def _short_hash(value: str | None) -> str | None:
+    return value[:12] if value else None
 
 def _deterministic_decay_score(primary_metric: float | None, feedback_summary: FeedbackSummary | None = None) -> float:
     feedback_penalty = 0.0

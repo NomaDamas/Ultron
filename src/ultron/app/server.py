@@ -65,10 +65,27 @@ def create_app() -> FastAPI:
         response.set_cookie("ultron_csrf", csrf_token, httponly=False, samesite="strict", secure=session_store.secure_cookies)
         return """<!doctype html>
 <html lang=\"en\">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Ultron Triage</title><link rel="stylesheet" href="/static/app.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Ultron Chat</title><link rel="stylesheet" href="/static/chat.css"></head>
 <body>
-  <main id=\"app\" data-csrf-cookie=\"ultron_csrf\">Loading Ultron triage...</main>
-  <script src=\"/static/app.js\"></script>
+  <main id=\"app\" data-csrf-cookie=\"ultron_csrf\">Loading Ultron chat...</main>
+  <script src=\"/static/chat.js\"></script>
+</body>
+</html>"""
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    def dashboard(response: Response) -> str:
+        session_token = session_store.create_session(DEFAULT_LOCAL_PRINCIPAL, SESSION_TTL_SECONDS)
+        csrf_token = secrets.token_urlsafe(24)
+        csrf_tokens[session_token] = csrf_token
+        response.headers["Content-Security-Policy"] = CSP
+        response.set_cookie("ultron_session", session_token, **session_store.cookie_attributes(httponly=True))
+        response.set_cookie("ultron_csrf", csrf_token, httponly=False, samesite="strict", secure=session_store.secure_cookies)
+        return """<!doctype html>
+<html lang=\"en\">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Ultron Dashboard</title><link rel="stylesheet" href="/static/dashboard.css"></head>
+<body>
+  <main id=\"app\" data-csrf-cookie=\"ultron_csrf\">Loading Ultron dashboard...</main>
+  <script src=\"/static/dashboard.js\"></script>
 </body>
 </html>"""
 
@@ -81,6 +98,26 @@ def create_app() -> FastAPI:
     def metrics(response: Response) -> dict[str, Any]:
         response.headers["Content-Security-Policy"] = CSP
         return engine.telemetry.snapshot()
+
+    @app.get("/api/toolbelt")
+    def toolbelt(response: Response) -> dict[str, Any]:
+        response.headers["Content-Security-Policy"] = CSP
+        return {"modules": engine.active_modules(), "active_pointer_version": engine.current_pointer_version()}
+
+    @app.get("/api/ecology")
+    def ecology(response: Response) -> dict[str, Any]:
+        response.headers["Content-Security-Policy"] = CSP
+        return {"modules_by_lifecycle": engine.modules_by_lifecycle(), "active_pointer_version": engine.current_pointer_version(), "lineage": engine.lineage_view()}
+
+    @app.get("/api/runs")
+    def runs(response: Response, limit: int = 20) -> dict[str, Any]:
+        response.headers["Content-Security-Policy"] = CSP
+        return {"runs": engine.recent_runs(limit)}
+
+    @app.get("/api/ledger")
+    def ledger(response: Response, limit: int = 20) -> dict[str, Any]:
+        response.headers["Content-Security-Policy"] = CSP
+        return {"entries": engine.recent_ledger(limit), "safety": engine.safety_status()}
 
     @app.post("/api/action")
     def action(
