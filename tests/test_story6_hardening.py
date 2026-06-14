@@ -154,6 +154,70 @@ def test_malformed_action_validation_does_not_echo_secret_bearing_input():
         assert raw not in combined
 
 
+def test_malformed_action_validation_does_not_echo_secret_bearing_extra_field_name():
+    client = _client()
+    csrf = _csrf(client)
+    secret_field = "ghp_EXTRAfieldStory6SECRETtoken1234567890"
+    response = client.post(
+        "/api/action",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "type": "SUBMIT_REQUEST",
+            "payload": {"request_text": "safe request"},
+            "csrf_token": csrf,
+            secret_field: 1,
+        },
+    )
+    assert response.status_code == 422, response.text
+    combined = _dump(response.json())
+    assert secret_field not in combined
+    assert "EXTRAfieldStory6SECRET" not in combined
+
+
+def test_action_success_responses_do_not_echo_payload_supplied_ids():
+    client = _client()
+    csrf = _csrf(client)
+    engine = client.app.state.triage
+    submit = _action(client, csrf, "SUBMIT_REQUEST", {"request_text": "story6 id reflection audit"})
+    assert submit.status_code == 200, submit.text
+    candidate_hash = engine.last_candidate_hash
+
+    raw_run_id = "story6-run-id-sentinel ghp_RUNIDStory6SECRETtoken1234567890"
+    feedback = _action(client, csrf, "GIVE_FEEDBACK", {"run_id": raw_run_id, "rating": 1, "comment": "ok"})
+    assert feedback.status_code == 200, feedback.text
+    feedback_body = _dump(feedback.json())
+    assert raw_run_id not in feedback_body
+    assert "ghp_RUNIDStory6SECRETtoken1234567890" not in feedback_body
+
+    raw_canary_id = "story6-canary-id-sentinel ghp_CANARYStory6SECRETtoken1234567890"
+    benchmark = _action(client, csrf, "RUN_BENCHMARK", {"candidate_hash": candidate_hash, "canary_id": raw_canary_id}, engine.current_pointer_version())
+    assert benchmark.status_code == 200, benchmark.text
+    benchmark_body = _dump(benchmark.json())
+    assert raw_canary_id not in benchmark_body
+    assert "ghp_CANARYStory6SECRETtoken1234567890" not in benchmark_body
+
+
+def test_live_unavailable_503_bodies_are_generic():
+    client = _client()
+
+    @client.app.get("/story6-live-hermes")
+    def story6_live_hermes():
+        raise LiveHermesUnavailable("internal hermes secret ghp_HERMESStory6SECRETtoken1234567890")
+
+    @client.app.get("/story6-live-model")
+    def story6_live_model():
+        raise LiveModelUnavailable("internal model secret sk-MODELStory6SECRETtoken1234567890")
+
+    hermes = client.get("/story6-live-hermes")
+    assert hermes.status_code == 503
+    assert hermes.json() == {"detail": "live Hermes unavailable"}
+    assert "ghp_HERMESStory6SECRETtoken1234567890" not in hermes.text
+
+    model = client.get("/story6-live-model")
+    assert model.status_code == 503
+    assert model.json() == {"detail": "live model unavailable"}
+    assert "sk-MODELStory6SECRETtoken1234567890" not in model.text
+
 def test_redaction_preserves_common_words_and_blocks_truncated_prefixes():
     from ultron.app.triage import _redact
 

@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, PolicyDenied, build_triage_app_from_env
+from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, PolicyDenied, _redacted_scalar, build_triage_app_from_env
 from ultron.auth.principal import DEFAULT_LOCAL_PRINCIPAL, Scope, SessionStore
 from ultron.evolution.variation import VariationPrimitive
 from ultron.ui.runtime import ActionCommand, ActionType, validate_action
@@ -52,11 +52,11 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(LiveHermesUnavailable)
     async def live_hermes_unavailable_handler(request: Any, exc: LiveHermesUnavailable) -> JSONResponse:
-        return JSONResponse(status_code=503, content={"detail": f"live Hermes unavailable: {exc}"})
+        return JSONResponse(status_code=503, content={"detail": "live Hermes unavailable"})
 
     @app.exception_handler(LiveModelUnavailable)
     async def live_model_unavailable_handler(request: Any, exc: LiveModelUnavailable) -> JSONResponse:
-        return JSONResponse(status_code=503, content={"detail": f"live model unavailable: {exc}"})
+        return JSONResponse(status_code=503, content={"detail": "live model unavailable"})
 
     @app.get("/", response_class=HTMLResponse)
     def index(response: Response) -> str:
@@ -164,7 +164,7 @@ def create_app() -> FastAPI:
         except (ValidationError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=_safe_validation_errors(exc)) from exc
         except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(status_code=503, detail=_generic_live_unavailable_detail(exc)) from exc
 
         if cmd.type is ActionType.SUBMIT_REQUEST:
             request_text = str(cmd.payload.get("request_text", ""))
@@ -172,7 +172,7 @@ def create_app() -> FastAPI:
                 result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text, actor=principal.subject if principal else None)
                 canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text, actor=principal.subject if principal else None)
             except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
+                raise HTTPException(status_code=503, detail=_generic_live_unavailable_detail(exc)) from exc
             envelope = engine.build_inline_genui_envelope(result, canary)
             return _jsonable(
                 {
@@ -191,15 +191,16 @@ def create_app() -> FastAPI:
             try:
                 evaluation = engine.benchmark_and_decide(candidate_hash, canary_id=str(cmd.payload.get("canary_id") or engine.last_canary_id or ""), actor=principal.subject if principal else None)
             except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
+                raise HTTPException(status_code=503, detail=_generic_live_unavailable_detail(exc)) from exc
             except PermissionError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             except (KeyError, ValueError) as exc:
                 raise HTTPException(status_code=403, detail=_safe_validation_errors(exc)) from exc
-            return _jsonable({"ok": True, "candidate_hash": _short_hash(candidate_hash), "canary_id": str(cmd.payload.get("canary_id") or engine.last_canary_id or ""), "status": "benchmark_complete"})
+            return _jsonable({"ok": True, "candidate_hash": _short_hash(candidate_hash), "canary_id": _short_hash(str(evaluation.get("canary_id") or engine.last_canary_id or "")), "status": "benchmark_complete"})
         if cmd.type is ActionType.GIVE_FEEDBACK:
-            event = engine.submit_feedback(str(cmd.payload.get("run_id", engine.last_manifest.run_id if engine.last_manifest else "run")), int(cmd.payload.get("rating", 1)), str(cmd.payload.get("comment", "")), actor=principal.subject if principal else None)
-            return _jsonable({"ok": True, "run_id": event.run_id, "status": event.event_type.value})
+            server_run_id = engine.last_manifest.run_id if engine.last_manifest else "run"
+            event = engine.submit_feedback(server_run_id, int(cmd.payload.get("rating", 1)), str(cmd.payload.get("comment", "")), actor=principal.subject if principal else None)
+            return _jsonable({"ok": True, "run_id": _short_hash(event.run_id), "status": event.event_type.value})
         if cmd.type is ActionType.APPROVE_PROMOTION:
             candidate_hash = str(cmd.payload.get("candidate_hash") or "")
             try:
@@ -217,7 +218,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=403, detail="canary rejected by policy")
             report = engine.rollback_controller.rollback(canary_id, actor=principal.subject if principal else None)
             engine.telemetry.increment("rollbacks", event="rollback", subject=principal.subject if principal else None)
-            return _jsonable({"ok": True, "canary_id": canary_id, "status": "rollback_complete"})
+            return _jsonable({"ok": True, "canary_id": _short_hash(report.canary_id), "status": "rollback_complete"})
         if cmd.type is ActionType.RESTORE_MODULE:
             restored = engine.atrophy_and_restore(str(cmd.payload.get("module_hash") or "") or None, actor=principal.subject if principal else None)
             return _jsonable({"ok": True, "module_hash": _short_hash(str(restored.get("module_hash") or "")), "restored": bool(restored.get("restored")), "status": "restore_complete"})
@@ -251,13 +252,38 @@ def _safe_validation_errors(exc: ValidationError | RequestValidationError | Valu
     if isinstance(exc, (ValidationError, RequestValidationError)):
         return [
             {
-                "loc": list(error.get("loc", ())),
+                "loc": _safe_validation_loc(error.get("loc", ())),
                 "msg": str(error.get("msg", "invalid action request")),
                 "type": str(error.get("type", "value_error")),
             }
             for error in exc.errors()
         ]
     return "invalid action request"
+
+
+_KNOWN_ACTION_LOC_SEGMENTS = frozenset(ActionCommand.model_fields)
+
+
+def _safe_validation_loc(loc: Any) -> list[str | int]:
+    sanitized: list[str | int] = []
+    for index, segment in enumerate(loc if isinstance(loc, (list, tuple)) else (loc,)):
+        if isinstance(segment, int):
+            sanitized.append(segment)
+        elif isinstance(segment, str) and index == 0 and segment in {"body", "query", "path", "header", "cookie"}:
+            sanitized.append(segment)
+        elif isinstance(segment, str) and segment in _KNOWN_ACTION_LOC_SEGMENTS:
+            sanitized.append(segment)
+        elif isinstance(segment, str):
+            sanitized.append(_redacted_scalar(segment, max_length=32) if segment != _redacted_scalar(segment, max_length=32) else "<field>")
+        else:
+            sanitized.append("<field>")
+    return sanitized
+
+
+def _generic_live_unavailable_detail(exc: Exception) -> str:
+    if isinstance(exc, LiveHermesUnavailable):
+        return "live Hermes unavailable"
+    return "live model unavailable"
 
 
 def _jsonable(value: Any) -> Any:

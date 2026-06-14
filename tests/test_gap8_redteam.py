@@ -159,7 +159,7 @@ def test_fail_closed_live_dependencies_and_server_503(monkeypatch, tmp_path):
     csrf = _authed(client)
     response = client.post("/api/action", headers={"X-CSRF-Token": csrf}, json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "live missing deps"}, "csrf_token": csrf})
     assert response.status_code == 503
-    assert "hermes-agent not installed" in response.json()["detail"]
+    assert response.json()["detail"] == "live Hermes unavailable"
     assert client.app.state.triage.last_manifest is None
 
 

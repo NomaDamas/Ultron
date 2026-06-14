@@ -240,7 +240,7 @@ def test_uispec_live_model_unavailable_returns_503_not_stub_or_500(monkeypatch):
     assert response.status_code == 503
     body = response.json()
     assert "live model unavailable" in body["detail"]
-    assert "ULTRON_MODEL_BASE_URL" in body["detail"]
+    assert "ULTRON_MODEL_BASE_URL" not in body["detail"]
     assert "components" not in body
 
 
