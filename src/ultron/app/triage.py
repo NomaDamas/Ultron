@@ -523,7 +523,7 @@ class TriageApp:
 
     def lineage_view(self) -> list[dict[str, str | None]]:
         return [
-            {"parent_id": entry.module.parent_id, "child_id": entry.module.content_hash, "module_id": entry.module.module_id}
+            {"parent_id": _short_hash(entry.module.parent_id), "child_id": _short_hash(entry.module.content_hash), "module_id": entry.module.module_id}
             for entry in self._registry_entries()
             if entry.module.parent_id is not None
         ]
@@ -577,7 +577,7 @@ class TriageApp:
             "module_id": module.module_id,
             "version": module.version,
             "content_hash": _short_hash(module.content_hash),
-            "parent_id": module.parent_id,
+            "parent_id": _short_hash(module.parent_id),
             "fitness": {
                 "usage_count": module.fitness.usage_count,
                 "promotion_state": module.fitness.promotion_state.value,

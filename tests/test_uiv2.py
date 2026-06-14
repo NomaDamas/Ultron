@@ -77,9 +77,15 @@ def test_read_only_endpoints_return_documented_no_secret_json():
 
     ecology = bodies["/api/ecology"]
     assert {"seed", "candidate", "survivor", "decaying", "pruned", "quarantined"}.issubset(ecology["modules_by_lifecycle"])
-    survivor = ecology["modules_by_lifecycle"]["survivor"][0]
-    assert {"module_id", "version", "content_hash", "parent_id", "fitness"}.issubset(survivor)
-    assert len(survivor["content_hash"]) <= 12
+    candidate = ecology["modules_by_lifecycle"]["candidate"][0]
+    assert {"module_id", "version", "content_hash", "parent_id", "fitness"}.issubset(candidate)
+    assert len(candidate["content_hash"]) <= 12
+    assert candidate["parent_id"] is not None
+    assert len(candidate["parent_id"]) == len(candidate["content_hash"]) == 12
+    assert candidate["parent_id"] != candidate["content_hash"]
+    assert all(item["parent_id"] is not None and len(item["parent_id"]) == 12 and len(item["child_id"]) == 12 for item in ecology["lineage"])
+    assert any(item["parent_id"] == candidate["parent_id"] and item["child_id"] == candidate["content_hash"] for item in ecology["lineage"])
+    assert all(len(value) != 64 for item in ecology["lineage"] for value in (item["parent_id"], item["child_id"]) if value)
     assert "active_pointer_version" in ecology
     assert "lineage" in ecology
 

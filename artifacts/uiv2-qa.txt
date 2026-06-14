@@ -13,4 +13,4 @@ tests/test_gap7_redteam.py: 20 warnings
     return super().request(
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-321 passed, 3 skipped, 21 warnings in 13.31s
+321 passed, 3 skipped, 21 warnings in 7.94s
