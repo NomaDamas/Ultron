@@ -108,6 +108,15 @@ def test_no_raw_request_feedback_or_secrets_across_envelope_and_read_surfaces():
     feedback = _action(client, csrf, "GIVE_FEEDBACK", {"run_id": run_id, "rating": -1, "comment": "story6 feedback raw sentinel ghp_story6SECRETtoken1234567890"})
     assert feedback.status_code == 200, feedback.text
     assert set(feedback.json()) == {"ok", "run_id", "status"}
+    permission_reason = f"Permission expansion path {sentinel} ghp_story6SECRETtoken1234567890 sk-story6SECRETtoken1234567890 story6-secret@example.com"
+    permission = _action(
+        client,
+        csrf,
+        "REQUEST_PERMISSION_EXPANSION",
+        {"tool": "shell", "scope": "story6-secret", "reason": permission_reason},
+        client.app.state.triage.current_pointer_version(),
+    )
+    assert permission.status_code == 200, permission.text
 
     surfaces = {"SUBMIT_REQUEST": submit_body, "GIVE_FEEDBACK": feedback.json(), "InlineGenUiEnvelope": submit_body["envelope"]}
     for endpoint in ["/api/personalization", "/api/toolbelt", "/api/ecology", "/api/runs", "/api/ledger", "/api/metrics"]:
@@ -133,6 +142,40 @@ def test_redaction_preserves_common_words_and_blocks_truncated_prefixes():
     assert sentinel_prefix not in redacted
     assert "sk-story6SECRETtoken1234567890" not in redacted
 
+
+def test_permission_request_reason_redacted_from_ledger_safety_surface():
+    client = _client()
+    csrf = _csrf(client)
+    engine = client.app.state.triage
+    sentinel = "permission-raw-sentinel-story6-blocker"
+    secret = "ghp_permissionSECRETtoken1234567890"
+    reason = f"Need shell for {sentinel} {secret} story6-permission@example.com sk-permissionSECRETtoken1234567890"
+    permission = _action(
+        client,
+        csrf,
+        "REQUEST_PERMISSION_EXPANSION",
+        {"tool": "shell", "scope": "story6-permission", "reason": reason},
+        engine.current_pointer_version(),
+    )
+    assert permission.status_code == 200, permission.text
+    short_id = permission.json()["request_id"]
+
+    endpoints = ["/api/ledger"]
+    if any(getattr(route, "path", None) == "/api/safety" for route in client.app.routes):
+        endpoints.append("/api/safety")
+    surfaces = {}
+    for endpoint in endpoints:
+        response = client.get(endpoint)
+        assert response.status_code == 200
+        surfaces[endpoint] = response.json()
+
+    combined = _dump(surfaces)
+    for raw in [sentinel, secret, reason, "story6-permission@example.com", "sk-permissionSECRETtoken1234567890"]:
+        assert raw not in combined
+    assert short_id in combined
+    assert "pending_human_approval" in combined
+    assert "reason_summary" in combined
+    assert "tool_summary" in combined
 
 
 def test_action_responses_are_status_and_short_ids_only():

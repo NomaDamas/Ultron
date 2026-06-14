@@ -252,27 +252,6 @@ function applyAnimation(node, animation) {
   if (className) node.classList.add(className);
 }
 
-function renderHarnessShaping(data) {
-  const box = el('section', 'shaping-card anim-slide-up');
-  box.append(el('h3', null, 'Built/tuned a tool for this workflow'));
-  const candidate = data.candidate || {};
-  const summary = el('dl', 'kv');
-  addKv(summary, 'Module', candidate.name || candidate.module_id || 'Candidate harness module');
-  addKv(summary, 'Candidate', shortHash(candidate.content_hash));
-  addKv(summary, 'Canary', data.canary_id || '—');
-  addKv(summary, 'Mutation', data.result?.run_result?.plan || 'Prompt/tooling tuned from this request.');
-  box.append(summary);
-  const controls = el('div', 'feedback-controls');
-  const up = el('button', 'feedback-button', 'Keep shaping this way');
-  const down = el('button', 'feedback-button', 'Less like this');
-  up.type = 'button';
-  down.type = 'button';
-  up.addEventListener('click', () => sendFeedback(1, 'preserve this harness direction'));
-  down.addEventListener('click', () => sendFeedback(-1, 'avoid this harness direction'));
-  controls.append(up, down);
-  box.append(controls);
-  return box;
-}
 
 async function sendFeedback(rating, comment) {
   const data = await sendAction('GIVE_FEEDBACK', { run_id: state.lastRunId || 'run', rating, comment });

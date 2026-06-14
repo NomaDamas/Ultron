@@ -955,10 +955,11 @@ class TriageApp:
     def _safe_permission_request(self, request: dict[str, Any]) -> dict[str, Any]:
         payload = dict(request.get("payload", {}))
         return {
-            "request_id": request.get("request_id"),
-            "status": request.get("status"),
-            "tool": payload.get("tool"),
-            "reason": payload.get("reason"),
+            "request_id": _short_hash(str(request.get("request_id") or "")),
+            "status": _redacted_scalar(request.get("status"), max_length=40),
+            "tool_summary": _redacted_scalar(payload.get("tool") or "not requested", max_length=80),
+            "reason_summary": _redacted_summary_line(payload.get("reason") or "No reason supplied", max_length=180),
+            "payload_redacted": True,
         }
 
     def canary_active(self, canary_id: str) -> bool:

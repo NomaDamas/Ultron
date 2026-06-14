@@ -115,7 +115,7 @@ function renderSafety(safety) {
   const requests = el('section', 'subpanel');
   requests.append(el('h3', null, 'Pending permission expansions'));
   const list = el('div', 'table-list');
-  for (const item of safety.pending_permission_expansions || []) list.append(row(['request', item.request_id, item.status, item.tool || '—', item.reason || '—']));
+  for (const item of safety.pending_permission_expansions || []) list.append(row(['request', item.request_id, item.status, item.tool_summary || '—', item.reason_summary || '—']));
   if (!safety.pending_permission_expansions || safety.pending_permission_expansions.length === 0) list.append(el('p', 'empty', 'No pending permission requests.'));
   requests.append(list);
   const controls = el('section', 'subpanel');
