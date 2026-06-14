@@ -244,7 +244,7 @@ class TriageApp:
         candidate_eval = self.evaluated_candidates.get(candidate_hash, {})
         report = candidate_eval.get("report")
         manifest_hash = _short_hash(run_manifest.active_module_set_hash) or "manifest"
-        trajectory_id = str(run_manifest.model_snapshot.get("trajectory_id") or adapter_result.trajectory_id or "trajectory")
+        trajectory_id = _redacted_scalar(run_manifest.model_snapshot.get("trajectory_id") or adapter_result.trajectory_id or "trajectory", request_text, max_length=80)
         summary_lines = [_redacted_summary_line(output.get("plan"), request_text), _redacted_summary_line(output.get("risk"), request_text), _redacted_summary_line(output.get("tests"), request_text)]
         pending_permissions = len(self.pending_permission_expansions)
         rollback_state = RollbackState.READY if canary_id and self.canary_active(canary_id) else RollbackState.UNAVAILABLE
@@ -300,12 +300,12 @@ class TriageApp:
                     region=Region.MAIN,
                     priority=20,
                     props={
-                        "parent_hash": _short_hash(getattr(proposal, "parent_hash", None)) or _short_hash(candidate.parent_id) or "parent",
-                        "candidate_hash": _short_hash(candidate_hash) or "candidate",
-                        "primitive": str(getattr(getattr(proposal, "primitive", "PROMPT_SLOT_EDIT"), "value", getattr(proposal, "primitive", "PROMPT_SLOT_EDIT"))),
+                        "parent_hash": _redacted_scalar(_short_hash(getattr(proposal, "parent_hash", None)) or _short_hash(candidate.parent_id) or "parent", request_text, max_length=32),
+                        "candidate_hash": _redacted_scalar(_short_hash(candidate_hash) or "candidate", request_text, max_length=32),
+                        "primitive": _redacted_scalar(getattr(getattr(proposal, "primitive", "PROMPT_SLOT_EDIT"), "value", getattr(proposal, "primitive", "PROMPT_SLOT_EDIT")), request_text, max_length=80),
                         "lifecycle": HarnessLifecycle.CANDIDATE,
                         "rationale": _redacted_summary_line(getattr(proposal, "rationale", "Candidate harness canary created from trusted server-side run output."), request_text, max_length=240),
-                        "canary_id": canary_id,
+                        "canary_id": _redacted_scalar(canary_id, request_text, max_length=80) if canary_id else None,
                     },
                     animation=AnimationHint(kind="slide_up", duration_ms=280, delay_ms=100, reduced_motion_fallback="fade_in"),
                 ),
@@ -1062,13 +1062,13 @@ def _build_durable_triage_app(db_path: str, *, signer: ManifestSigner) -> Triage
 
 
 SECRET_PATTERNS = [
+    re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
     re.compile(r"\bghp_[A-Za-z0-9_]{8,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{8,}\b"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b", re.IGNORECASE),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\b[A-Fa-f0-9]{32,}\b"),
-    re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
 ]
 
 
@@ -1083,6 +1083,10 @@ def _redact(text: Any, request_text: str | None = None) -> str:
 
 
 def _redacted_summary_line(value: Any, request_text: str | None = None, max_length: int = 180) -> str:
+    return _bounded_summary_line(_redact(value, request_text), max_length=max_length)
+
+
+def _redacted_scalar(value: Any, request_text: str | None = None, max_length: int = 80) -> str:
     return _bounded_summary_line(_redact(value, request_text), max_length=max_length)
 
 def _bounded_summary_line(value: Any, max_length: int = 180) -> str:
