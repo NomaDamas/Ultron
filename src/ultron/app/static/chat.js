@@ -1,4 +1,13 @@
-const state = { csrfCookieName: 'ultron_csrf', activePointerVersion: null, lastRunId: null };
+const state = { csrfCookieName: 'ultron_csrf', lastRunId: null };
+const ANIMATION_CLASS = {
+  none: '',
+  fade_in: 'anim-fade-in',
+  slide_up: 'anim-slide-up',
+  pulse_glow: 'anim-pulse-glow',
+  reticle_scan: 'anim-reticle-scan',
+  expand: 'anim-expand'
+};
+const REDUCED_MOTION = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -21,20 +30,25 @@ function createShell() {
   const shell = el('div', 'chat-shell');
   const header = el('header', 'topbar');
   const brand = el('div', 'brand');
-  brand.append(el('span', 'brand-mark', 'U'), el('div', 'brand-copy'));
-  brand.querySelector('.brand-copy').append(el('strong', null, 'Ultron'), el('span', null, 'Ask for the harness you want. The agent builds and whittles it into your workflow.'));
+  const orb = el('span', 'ultron-orb');
+  orb.setAttribute('aria-hidden', 'true');
+  const copy = el('div', 'brand-copy');
+  copy.append(el('strong', null, 'Ultron'), el('span', null, 'JARVIS HUD online · chat control surface'));
+  brand.append(orb, copy);
+  const presence = el('div', 'status-presence');
+  presence.append(el('span', 'status-dot'), el('span', null, 'Core stable'));
   const nav = el('nav', 'nav-links');
-  const dashboard = el('a', null, 'Dashboard');
+  const dashboard = el('a', null, 'Settings');
   dashboard.href = '/dashboard';
   nav.append(dashboard);
-  header.append(brand, nav);
+  header.append(brand, presence, nav);
 
   const main = el('main', 'chat-main');
   const thread = el('section', 'thread');
   thread.id = 'thread';
   thread.setAttribute('aria-live', 'polite');
   const intro = el('article', 'turn agent-turn');
-  intro.append(el('p', 'bubble agent-bubble', 'Mission control online. Tell me the workflow tool or harness behavior you want; I will respond here and render the generated UI inline.'));
+  intro.append(el('p', 'bubble agent-bubble', 'Mission control online. Tell me the workflow harness behavior you want; inline GenUI cards will render in this thread.'));
   thread.append(intro);
 
   const composer = el('form', 'composer');
@@ -55,13 +69,7 @@ function createShell() {
   });
   main.append(thread, composer);
 
-  const rail = el('aside', 'toolbelt');
-  rail.append(el('h2', null, 'Your tools'), el('p', 'rail-copy', 'Personalized active modules the agent has built, tuned, and retained for you.'));
-  const tools = el('div', 'tool-list');
-  tools.id = 'tool-list';
-  rail.append(tools);
-
-  shell.append(header, main, rail);
+  shell.append(header, main);
   app.append(shell);
 }
 
@@ -85,12 +93,11 @@ async function submitRequest(requestText) {
   pending.remove();
   if (!data || !data.ok) return;
   appendAgentTurn(data);
-  await refreshToolbelt();
 }
 
 async function sendAction(type, payload) {
   const csrf = cookieValue(state.csrfCookieName);
-  const command = { type, payload: payload || {}, csrf_token: csrf, active_pointer_version: state.activePointerVersion };
+  const command = { type, payload: payload || {}, csrf_token: csrf };
   try {
     const response = await fetch('/api/action', {
       method: 'POST',
@@ -136,13 +143,21 @@ function renderUiSpec(parent, spec) {
     const props = component && typeof component.props === 'object' && component.props !== null ? component.props : {};
     const built = card(String(component.type || 'PANEL').replaceAll('_', ' '), props.summary || props.title || props);
     built.classList.add('uispec-card');
+    applyAnimation(built, component.animation);
     parent.append(built);
   }
 }
 
+function applyAnimation(node, animation) {
+  if (REDUCED_MOTION) return;
+  const kind = typeof animation?.kind === 'string' ? animation.kind : 'none';
+  const className = ANIMATION_CLASS[kind] || '';
+  if (className) node.classList.add(className);
+}
+
 function renderHarnessShaping(data) {
-  const box = el('section', 'shaping-card');
-  box.append(el('h3', null, '🧩 Built/tuned a tool for this workflow'));
+  const box = el('section', 'shaping-card anim-slide-up');
+  box.append(el('h3', null, 'Built/tuned a tool for this workflow'));
   const candidate = data.candidate || {};
   const summary = el('dl', 'kv');
   addKv(summary, 'Module', candidate.name || candidate.module_id || 'Candidate harness module');
@@ -151,8 +166,8 @@ function renderHarnessShaping(data) {
   addKv(summary, 'Mutation', data.result?.run_result?.plan || 'Prompt/tooling tuned from this request.');
   box.append(summary);
   const controls = el('div', 'feedback-controls');
-  const up = el('button', 'feedback-button', '👍 Keep shaping this way');
-  const down = el('button', 'feedback-button', '👎 Less like this');
+  const up = el('button', 'feedback-button', 'Keep shaping this way');
+  const down = el('button', 'feedback-button', 'Less like this');
   up.type = 'button';
   down.type = 'button';
   up.addEventListener('click', () => sendFeedback(1, 'preserve this harness direction'));
@@ -165,11 +180,10 @@ function renderHarnessShaping(data) {
 async function sendFeedback(rating, comment) {
   const data = await sendAction('GIVE_FEEDBACK', { run_id: state.lastRunId || 'run', rating, comment });
   if (data?.ok) appendNotice('Preference signal recorded. Your harness will be whittled with that feedback.');
-  await refreshToolbelt();
 }
 
 function card(title, value) {
-  const section = el('section', 'card');
+  const section = el('section', 'card anim-fade-in');
   section.append(el('h3', null, title));
   if (value && typeof value === 'object') {
     const list = el('dl', 'kv');
@@ -185,34 +199,6 @@ function addKv(parent, key, value) {
   const row = el('div', 'kv-row');
   row.append(el('dt', null, key), el('dd', null, formatValue(value)));
   parent.append(row);
-}
-
-async function refreshToolbelt() {
-  try {
-    const response = await fetch('/api/toolbelt');
-    const data = await response.json();
-    if (!response.ok) throw new Error('toolbelt unavailable');
-    state.activePointerVersion = data.active_pointer_version;
-    const list = document.getElementById('tool-list');
-    list.textContent = '';
-    for (const module of data.modules || []) list.append(renderTool(module));
-    if (!data.modules || data.modules.length === 0) list.append(el('p', 'empty', 'No active tools yet.'));
-  } catch (error) {
-    appendNotice(`Toolbelt refresh failed: ${error.message || error}`);
-  }
-}
-
-function renderTool(module) {
-  const item = el('article', 'tool-card');
-  item.append(el('strong', null, module.name || module.module_id));
-  item.append(el('span', null, `${module.module_id} v${module.version}`));
-  item.append(el('span', null, `lens ${module.target_lens}`));
-  const fitness = module.fitness || {};
-  item.append(el('span', null, `used ${fitness.usage_count || 0} · ${fitness.promotion_state || 'active'} · metric ${formatValue(fitness.primary_metric)}`));
-  const tags = el('div', 'tags');
-  for (const tag of module.workflow_tags || []) tags.append(el('span', 'tag', tag));
-  item.append(tags);
-  return item;
 }
 
 function appendNotice(message) {
@@ -252,4 +238,3 @@ function shortHash(value) {
 }
 
 createShell();
-refreshToolbelt();
