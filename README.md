@@ -107,7 +107,7 @@ The pinned Hermes path lazily imports `hermes-agent`, runs under an isolated HOM
 
 ## Status & roadmap
 
-- Baseline (G001–G007) + hardening (GAP1–GAP8) + the chat-only generative-UI iteration (Stories 1–6) are implemented and gated. **389 tests pass / 3 skipped** (skips need live creds).
+- Baseline (G001-G007) + hardening (GAP1-GAP7, plus GAP8 live wiring) + the chat-only generative-UI iteration (Stories 1-6) are implemented and gated. **389 tests pass / 3 skipped** (skips need live creds).
 - Remaining future work is tracked in [GitHub Issues](https://github.com/NomaDamas/Ultron/issues): live Hermes/model validation, topology/subagent orchestration, multi-tenant/team, ops connectors, durable raw personalization, voice/orb, expanded GenUI registry, explicit pinning, first live benchmark fixture.
 
 ## Non-goals / MVP non-scope
