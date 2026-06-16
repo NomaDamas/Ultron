@@ -16,7 +16,7 @@ Ultron is a modular, self-evolving **harness ecology** built around a *preserved
 
 ## What you experience
 
-- **A chat (`/`).** Ask for what you want. The agent builds/tunes a tool and the result streams back as **generative-UI cards** (plan, risk, tests, tool result, evidence, safety) right in the conversation. 👍/👎 feedback quietly shapes your harness over time. Your accumulated tools live in a personalized space — you never *configure* anything.
+- **A command surface (`/`).** A command bar drives a **bounded generative-UI canvas** (not a scrolling transcript): ask for what you want and the agent builds/tunes a tool, streaming the result back as **generative-UI cards** (plan, risk, tests, tool result, evidence, safety). Toggle **Replace (A)** vs **Accumulate (B)** to transform the canvas or keep a capped workspace; pin cards you want to keep. Attach an **image** to drive the multimodal (VLM) path. 👍/👎 feedback quietly shapes your harness over time.
 - **A settings dashboard (`/dashboard`), separate.** Only for observing/operating: the evolution ecology (modules by lifecycle, lineage, fitness), runs & evidence, the audit ledger, safety state, metrics, and redacted personalization signal. The user's chat is never cluttered with this.
 - **JARVIS / Iron-Man HUD aesthetic.** Deep space blue (`#0a0e1a`), cyan glow (`#00d4ff`), holographic glass panels, reticle/scanline accents, an animated Ultron orb — smooth, CSP-safe animations with `prefers-reduced-motion` support.
 
@@ -90,24 +90,41 @@ Real: typed module contracts, registry/resolver, signed manifests, ledger, rollb
 
 Seam: Hermes execution uses `DeterministicFakeHermesAdapter`; UI/module generation use deterministic fakes. No live Hermes process or model in the sandbox. Live adapters/generators fail closed and must not return fake/stub providers.
 
-## Going live (real Hermes + model)
+## Configuration & going live (real Hermes + LLM + VLM)
+
+Ultron is configured **without code edits** — via `.env`, the committed `ultron config` CLI, or the write-only **Model settings** panel on `/dashboard`. Secrets are stored server-side in an out-of-repo store (`${ULTRON_CONFIG_DIR:-~/.config/ultron}/secrets.json`, owner-only); reads only ever expose status + a redacted `SecretRef` (fingerprint/last4/source). Precedence: **runtime secret store > process env > `.env`**.
+
+Copy `.env.example` → `.env`, or use the CLI:
+
+```bash
+python -m ultron.config set llm.api_key --stdin     # secret, no echo (also: ultron config ...)
+python -m ultron.config set llm.model gpt-4o-mini    # non-secret value
+python -m ultron.config set vlm.api_key --stdin      # vision/multimodal key
+python -m ultron.config status                       # redacted view, never prints secrets
+```
+
+To run live (LLM **and** VLM are both attachable; OpenAI-compatible):
 
 ```bash
 pip install hermes-agent
 export ULTRON_ADAPTER=pinned-hermes
-export ULTRON_UI_GENERATOR=model
+export ULTRON_UI_GENERATOR=model        # model-driven generative UI
 export ULTRON_MODULE_SYNTH=model
-export ULTRON_MODEL_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
-export ULTRON_MODEL_API_KEY=...
-export ULTRON_MODEL_NAME=...
+export ULTRON_VLM=model                  # vision/multimodal path
+export ULTRON_LLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
+export ULTRON_LLM_API_KEY=...
+export ULTRON_LLM_MODEL=gpt-4o-mini
+export ULTRON_VLM_BASE_URL=https://api.openai.com/v1
+export ULTRON_VLM_API_KEY=...
+export ULTRON_VLM_MODEL=gpt-4o
 ./run.sh
 ```
 
-The pinned Hermes path lazily imports `hermes-agent`, runs under an isolated HOME/workspace per request, and never writes global Hermes state. Missing deps/keys fail closed with live-unavailable errors — Ultron never substitutes stub/fake results for a selected live path.
+The pinned Hermes path lazily imports `hermes-agent`, runs under an isolated HOME/workspace per request, and never writes global Hermes state. Missing deps/keys fail closed with live-unavailable errors — Ultron never substitutes stub/fake results for a selected live path. Image input is bounded (1 image, 4 MiB, PNG/JPEG/WebP, ≤4096px/16MP, EXIF stripped); raw bytes never leave request scope and the VLM observation is redacted context only — final UI still passes server validation.
 
 ## Status & roadmap
 
-- Baseline (G001-G007) + hardening (GAP1-GAP7, plus GAP8 live wiring) + the chat-only generative-UI iteration (Stories 1-6) are implemented and gated. **389 tests pass / 3 skipped** (skips need live creds).
+- Baseline (G001-G007) + hardening (GAP1-GAP7, plus GAP8 live wiring) + the chat-only generative-UI iteration (Stories 1-6) + the model-driven multimodal iteration (LLM+VLM provider layer, `.env`/secret-store/settings/CLI config, model-driven UiSpec/synthesis, bounded image input, command-bar A/B canvas, hardening) are implemented and gated. **461 tests pass / 3 skipped** (skips need live creds).
 - Remaining future work is tracked in [GitHub Issues](https://github.com/NomaDamas/Ultron/issues): live Hermes/model validation, topology/subagent orchestration, multi-tenant/team, ops connectors, durable raw personalization, voice/orb, expanded GenUI registry, explicit pinning, first live benchmark fixture.
 
 ## Non-goals / MVP non-scope
