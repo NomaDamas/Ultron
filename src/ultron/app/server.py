@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from ultron.app.triage import DEFAULT_SCOPE, DEFAULT_WORKFLOW, PolicyDenied, _redacted_scalar, build_triage_app_from_env
 from ultron.auth.principal import DEFAULT_LOCAL_PRINCIPAL, Scope, SessionStore
+from ultron.config import ModelSettingsWrite, build_config_service
 from ultron.evolution.variation import VariationPrimitive
 from ultron.ui.runtime import ActionCommand, ActionType, validate_action
 from ultron.hermes.adapter import LiveHermesUnavailable
@@ -38,13 +39,15 @@ MUTATING_USER_ACTIONS = {ActionType.SUBMIT_REQUEST, ActionType.GIVE_FEEDBACK}
 
 
 def create_app() -> FastAPI:
-    engine = build_triage_app_from_env()
+    config_service = build_config_service()
+    engine = build_triage_app_from_env(config_service)
     engine.seed_baseline()
     csrf_tokens: dict[str, str] = {}
     session_store = SessionStore(secure_cookies=os.getenv("ULTRON_SECURE_COOKIES", "0") == "1")
     app = FastAPI(title="Ultron Triage MVP")
     app.state.triage = engine
     app.state.session_store = session_store
+    app.state.config = config_service
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.exception_handler(RequestValidationError)
@@ -127,6 +130,38 @@ def create_app() -> FastAPI:
     def personalization(response: Response) -> dict[str, Any]:
         response.headers["Content-Security-Policy"] = CSP
         return engine.personalization_observability(DEFAULT_SCOPE, DEFAULT_WORKFLOW)
+
+    @app.get("/api/settings/model")
+    def get_model_settings(response: Response) -> dict[str, Any]:
+        response.headers["Content-Security-Policy"] = CSP
+        return config_service.model_settings_read().model_dump(mode="json")
+
+    @app.post("/api/settings/model")
+    def post_model_settings(
+        settings: ModelSettingsWrite,
+        response: Response,
+        ultron_session: str | None = Cookie(default=None),
+        x_csrf_token: str | None = Header(default=None),
+        x_csrf: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        response.headers["Content-Security-Policy"] = CSP
+        principal = session_store.resolve(ultron_session, time.time())
+        if principal is None:
+            engine.telemetry.increment("auth_failures", event="missing_or_expired_session")
+            raise HTTPException(status_code=401, detail="settings update requires authenticated session")
+        if not principal.has_scope(Scope.MANAGE_SETTINGS):
+            engine.telemetry.increment("auth_failures", event="missing_scope", subject=principal.subject)
+            raise HTTPException(status_code=403, detail=f"settings update requires scope {Scope.MANAGE_SETTINGS.value}")
+        provided_csrf = x_csrf_token or x_csrf
+        expected = csrf_tokens.get(ultron_session or "")
+        if not expected or provided_csrf != expected:
+            engine.telemetry.increment("auth_failures", event="invalid_request", subject=principal.subject)
+            raise HTTPException(status_code=403, detail="settings update requires a valid CSRF token")
+        try:
+            read = config_service.apply_write(settings, actor=principal.subject)
+        except KeyError as exc:
+            raise HTTPException(status_code=422, detail="unknown settings field") from exc
+        return read.model_dump(mode="json")
 
     @app.post("/api/action")
     def action(

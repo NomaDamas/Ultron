@@ -16,6 +16,7 @@ class Scope(StrEnum):
     RESTORE = "restore"
     REQUEST_PERMISSION_EXPANSION = "request_permission_expansion"
     RUN_BENCHMARK = "run_benchmark"
+    MANAGE_SETTINGS = "manage_settings"
 
 
 class Principal(BaseModel):

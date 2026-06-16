@@ -10,3 +10,8 @@ build/
 *.log
 artifacts/server*.log
 .gjc/
+.env
+.env.*
+# repo-local config dir if ULTRON_CONFIG_DIR is pointed inside the repo
+.config/ultron/
+secrets.json

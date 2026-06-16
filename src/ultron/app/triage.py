@@ -1289,7 +1289,12 @@ def _deterministic_decay_score(primary_metric: float | None, feedback_summary: F
     return max(metric_penalty, feedback_penalty)
 
 
-def build_triage_app_from_env() -> TriageApp:
+def build_triage_app_from_env(config_service: "ConfigService | None" = None) -> TriageApp:
+    # Resolve config first so .env and runtime secret-store settings are honored
+    # before any env-driven wiring or provider construction.
+    from ultron.config import build_config_service
+
+    config = config_service or build_config_service()
     adapter_name = os.getenv("ULTRON_ADAPTER", "fake")
     ui_name = os.getenv("ULTRON_UI_GENERATOR", "fake")
     synth_name = os.getenv("ULTRON_MODULE_SYNTH", "fake")
@@ -1300,7 +1305,10 @@ def build_triage_app_from_env() -> TriageApp:
         adapter = PinnedHermesAdapter(SubprocessHermesRunner())
     else:
         raise ValueError(f"unknown ULTRON_ADAPTER: {adapter_name}")
-    provider = HttpModelProvider() if ui_name == "model" or synth_name == "model" else None
+    provider = None
+    if ui_name == "model" or synth_name == "model":
+        llm_cfg = config.provider_config("llm")
+        provider = HttpModelProvider(base_url=llm_cfg.base_url, api_key=llm_cfg.api_key, model_name=llm_cfg.model_name)
     if ui_name == "fake":
         ui_generator: UiSpecGenerator = DeterministicFakeUiSpecGenerator()
     elif ui_name == "model":
