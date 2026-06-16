@@ -18,8 +18,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "fastapi", "uvicorn", "httpx", "jinja2"]
 
+[project.scripts]
+ultron = "ultron.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["tests"]
