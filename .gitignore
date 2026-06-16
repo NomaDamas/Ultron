@@ -2,6 +2,7 @@ vendor/
 __pycache__/
 *.pyc
 .pytest_cache/
+.pytest-cache/
 *.egg-info/
 .venv/
 dist/
