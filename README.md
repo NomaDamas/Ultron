@@ -1,89 +1,115 @@
 # Ultron
 
-Ultron is a modular self-evolving harness ecology built around a preserved `hermes-agent` core and a generative UI triage app. It keeps upstream Hermes behind explicit seams while Ultron owns module registration, composition, evolution, evaluation, persistence, auth, observability, and rollback safety.
+**An agent that creates the harness that creates itself in various environments and adapts.**
 
-## Quickstart
+Ultron is a modular, self-evolving **harness ecology** built around a *preserved* [`hermes-agent`](https://github.com/NousResearch/hermes-agent) core. You just chat. The agent builds the tools you need, renders them as **generative UI inside the chat**, and the more you use it the more your harness is **whittled to your workflow** — automatically, safely, and reversibly.
+
+---
+
+## Philosophy
+
+- **Preserve the core.** Upstream Hermes stays untouched behind explicit adapter seams. Ultron never mutates Hermes source, memory, skills, tools, or config — it only *attaches* to it.
+- **Modules are harnesses.** A centralized agent creates modules (prompt packs, tool policies, UI panels, safety/budget) like tool-calls. Those modules *are* your harness.
+- **Use shapes the harness.** Your usage, request history, and feedback become the selection pressure. Modules that help survive; modules that don't atrophy. Like a stone shaped by a river.
+- **Generative UI is the surface.** Tools and results appear as typed, server-validated UI components rendered *inline in the chat* — you see your work happen, you don't operate a dashboard.
+- **Safety is non-negotiable.** Self-modification is bounded (one change at a time), evidence-gated, reversible (no-poisoning rollback), audited, and privacy-redacted by construction.
+
+## What you experience
+
+- **A chat (`/`).** Ask for what you want. The agent builds/tunes a tool and the result streams back as **generative-UI cards** (plan, risk, tests, tool result, evidence, safety) right in the conversation. 👍/👎 feedback quietly shapes your harness over time. Your accumulated tools live in a personalized space — you never *configure* anything.
+- **A settings dashboard (`/dashboard`), separate.** Only for observing/operating: the evolution ecology (modules by lifecycle, lineage, fitness), runs & evidence, the audit ledger, safety state, metrics, and redacted personalization signal. The user's chat is never cluttered with this.
+- **JARVIS / Iron-Man HUD aesthetic.** Deep space blue (`#0a0e1a`), cyan glow (`#00d4ff`), holographic glass panels, reticle/scanline accents, an animated Ultron orb — smooth, CSP-safe animations with `prefers-reduced-motion` support.
+
+---
+
+## Quickstart (first-time user)
+
+> The server binds to your own machine's `localhost`. Run it locally; it is not a hosted service.
 
 ```bash
 git clone https://github.com/NomaDamas/Ultron.git
 cd Ultron            # if it cloned into a nested folder, cd into the one containing run.sh
-./run.sh             # creates .venv, installs, starts the server
+./run.sh             # creates .venv, installs deps, starts the server
 ```
 
-Then open **http://localhost:8799** (chat console) and **http://localhost:8799/dashboard** (ops dashboard).
+Then:
+
+1. Open **http://localhost:8799** — the chat console.
+2. Type a real request, e.g. *"build a tool to triage flaky tests in my repo and propose fixes."*
+3. Watch the agent build a tool and render the result as **inline generative-UI cards** (run summary, plan/risk/tests, harness-evolution, evidence, safety).
+4. Give 👍/👎 feedback — this is the signal that personalizes your harness over time.
+5. Open **http://localhost:8799/dashboard** to watch the evolution ecology, runs, ledger, safety, and metrics.
 
 Notes:
-- macOS/zsh: if `python` is "command not found", that's expected — `run.sh` uses `python3` and the venv binary directly. Set `PYTHON=python3.11` if needed.
-- Manual run (no script): `python3 -m venv .venv && ./.venv/bin/python -m pip install -e ".[dev]" && ./.venv/bin/python -m uvicorn ultron.app.server:create_app --factory --port 8799`
-- Hard-refresh the browser (Cmd+Shift+R) after restart; the server log should show `GET /static/chat.css 200`.
-- Default is **local/demo (fake) mode** — no API key needed. Live mode is opt-in (see "Going live" below); without keys/deps it fails closed, never faking results.
+- **No API key needed for the default (demo) mode** — it runs deterministically and fully. Live model/Hermes is opt-in (see *Going live*); without keys/deps it fails closed and never fakes results.
+- macOS/zsh: if `python` is "command not found", that's expected — `run.sh` uses `python3` + the venv binary directly. (`PYTHON=python3.11 ./run.sh` to pin.)
+- After restart, hard-refresh the browser (Cmd+Shift+R); the server log should show `GET /static/chat.css 200`.
+
+Verify it works:
+```bash
+.venv/bin/python -m pytest -q        # expect: 389 passed, 3 skipped
+```
+
+---
+
+## How it works (the loop)
+
+```
+request → resolver composes your active module-set → signed RunManifest
+        → Hermes adapter runs the work (fake by default; real when configured)
+        → result validated + redacted into an InlineGenUiEnvelope → rendered inline in chat
+        → your feedback + usage → non-raw PersonalizationSummary
+        → evolution loop: ONE bounded variation → benchmark selection
+          → promote (only on real benchmark evidence) / rollback (no-poisoning) / reversible atrophy
+```
 
 ## Architecture
 
-- `module/`: typed harness modules, blobs, surface contracts, privacy and fitness metadata.
-- `registry/`: append-safe module registry, lifecycle state, active pointer CAS.
-- `composition/`: resolver and module-set manifest construction.
-- `run/`: signed `RunManifest` provenance, including actor attribution for caused transitions.
-- `ledger/`: side-effect ledger, canary-scoped rollback, quarantine, actor audit.
+- `hermes/`: pinned Hermes metadata, adapter capability contract, static spike, vendor integrity; real + deterministic-fake adapters (fail-closed live seam).
+- `module/`: typed harness modules, content-addressed blobs, surface contracts, privacy + fitness metadata.
+- `registry/` + `composition/`: immutable module registry, lifecycle, atomic active-pointer CAS, deterministic resolver + module-set manifest.
+- `run/` + `ledger/`: signed `RunManifest` provenance (actor-attributed), side-effect ledger, canary rollback, quarantine, audit.
 - `evolution/`: variation, selection, active-set planning, atrophy/prune/restore controls.
-- `feedback/`: consented feedback capture and aggregation.
-- `evaluation/`: benchmark harness and benchmark-provenance-gated promotion evidence.
-- `ui/` and `app/`: server-owned generative UI runtime plus FastAPI triage surface.
-- `persistence/`: in-memory stores for the MVP path and SQLite durable stores/unit-of-work for restart-safe promotion/prune/restore.
-- `auth/`: local principal, scoped privileges, expiring sessions, CSRF defense in depth.
-- `obs/`: deterministic structured telemetry counters exposed at `/api/metrics`.
-- `hermes/`: pinned Hermes metadata, adapter capability contract, static spike, and vendor integrity verification.
+- `feedback/` + `evaluation/`: consented feedback aggregation; benchmark harness + benchmark-provenance-gated promotion.
+- `persistence/`: in-memory MVP path + SQLite durable stores/unit-of-work (restart-safe, atomic, fail-closed signer).
+- `ui/` + `app/`: server-owned generative UI runtime (typed components + bounded animation), chat console, separate dashboard, read-only no-secret endpoints.
+- `auth/` + `obs/`: scoped session principal, CSRF, actor audit; deterministic telemetry at `/api/metrics`.
 
-## Status
+## Safety model
 
-G001-G007 are implemented as the baseline modular harness, module registry/resolver, rollback/manifest safety, variation/selection/evaluation loops, feedback channel, generative UI runtime, and FastAPI triage MVP.
+- **Server-validated generative UI** — typed component registry + discriminated prop schemas; privileged/model-defined actions and unknown components rejected; strict CSP, no inline scripts/styles/eval.
+- **Evidence-gated promotion** — a module is promoted only with real benchmark-runner provenance (trajectory IDs, promotable evidence label, selector approval), current pointer version, session + CSRF + scope.
+- **No-poisoning rollback** — canaries run isolated; rollback is reversible and provably cannot leak into later runs.
+- **Privacy by construction** — raw request text, feedback comments, and secrets are redacted everywhere (responses, errors, read-only endpoints, ids); personalization uses non-raw summaries only.
+- **Audit** — every pointer/lifecycle/quarantine mutation records an actor.
+- **One change at a time** — variation is a single bounded primitive; permission expansion requires human approval.
 
-GAP1-GAP7 hardening is represented in tests and code: adapter contract and live-adapter fail-closed checks; blob-backed module integrity; durable SQLite persistence and signed run manifests; benchmark evidence gates; feedback/privacy controls; generative UI validation; platform auth/actor audit/observability/vendor-integrity/docs.
+## Real vs seam (in this sandbox)
 
-## Real vs seam
+Real: typed module contracts, registry/resolver, signed manifests, ledger, rollback quarantine, benchmark provenance gates, SQLite durable path, scoped auth/CSRF/actor audit, telemetry, vendor integrity, redaction.
 
-Real in this sandbox: typed module contracts, registry/resolver, signed run manifests, side-effect ledger, rollback quarantine, benchmark provenance gates, SQLite durable path, in-memory MVP path, scoped session auth, CSRF/pointer/policy/evidence defense in depth, actor audit, structured telemetry, and fail-closed vendor integrity verification when a vendor tree is present.
+Seam: Hermes execution uses `DeterministicFakeHermesAdapter`; UI/module generation use deterministic fakes. No live Hermes process or model in the sandbox. Live adapters/generators fail closed and must not return fake/stub providers.
 
-Seams in this sandbox: Hermes execution is represented by `DeterministicFakeHermesAdapter`, and module/UI generation use deterministic fake generators. There is no live Hermes process or live model provider in the sandbox. Live adapters/generators must not return fake/stub providers and fail closed when they do. The upstream Hermes core is preserved; topology orchestration, cron, gateway, and MCP surfaces remain deferred non-MVP integrations.
-
-## Promotion and rollback model
-
-Promotion requires benchmark-runner provenance, trajectory IDs, promotable evidence labels, selector approval, current pointer version, CSRF, authenticated session, and the required principal scope. Promotion, prune, restore, and rollback are ledgered; durable unit-of-work transitions record the actor subject and roll back atomically on failure.
-
-## Run tests
-
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install pyyaml 'pydantic>=2' pytest fastapi httpx uvicorn
-.venv/bin/python -m pytest tests/ -q
-```
-
-## Run the server
-
-```bash
-.venv/bin/python -m ultron.app.server
-```
-
-Open `http://127.0.0.1:8717/`. `GET /` issues an expiring local session and CSRF token. `POST /api/action` accepts typed actions. `GET /api/metrics` returns declared telemetry counters only, with no secrets.
-
-## Going live
-
-Defaults stay deterministic and fake: `ULTRON_ADAPTER=fake`, `ULTRON_UI_GENERATOR=fake`, and `ULTRON_MODULE_SYNTH=fake`. To use real seams on a machine with dependencies and credentials:
+## Going live (real Hermes + model)
 
 ```bash
 pip install hermes-agent
 export ULTRON_ADAPTER=pinned-hermes
 export ULTRON_UI_GENERATOR=model
 export ULTRON_MODULE_SYNTH=model
-export ULTRON_MODEL_BASE_URL=https://api.openai.com/v1
+export ULTRON_MODEL_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
 export ULTRON_MODEL_API_KEY=...
 export ULTRON_MODEL_NAME=...
-.venv/bin/python -m ultron.app.server
+./run.sh
 ```
 
-The pinned Hermes path lazily imports `hermes-agent`, runs under an isolated HOME/workspace for each request, and never writes global Hermes state. The model path uses an OpenAI-compatible chat-completions endpoint through `httpx`. Missing `hermes-agent`, model env, or `httpx` fails closed with live-unavailable errors; Ultron does not substitute stub/fake results for selected live paths.
+The pinned Hermes path lazily imports `hermes-agent`, runs under an isolated HOME/workspace per request, and never writes global Hermes state. Missing deps/keys fail closed with live-unavailable errors — Ultron never substitutes stub/fake results for a selected live path.
 
-## Non-goals and MVP non-scope
+## Status & roadmap
 
-Ultron does not mutate vendored Hermes source, global Hermes memory or skills, terminal backends, credentials, cron/gateway/MCP configuration, or upstream runtime internals. Multi-user identity providers, remote tenants, live model operation, production key management, distributed sessions, and topology orchestration are outside this MVP; the local default principal is a single-user development boundary, not an enterprise auth system.
+- Baseline (G001–G007) + hardening (GAP1–GAP8) + the chat-only generative-UI iteration (Stories 1–6) are implemented and gated. **389 tests pass / 3 skipped** (skips need live creds).
+- Remaining future work is tracked in [GitHub Issues](https://github.com/NomaDamas/Ultron/issues): live Hermes/model validation, topology/subagent orchestration, multi-tenant/team, ops connectors, durable raw personalization, voice/orb, expanded GenUI registry, explicit pinning, first live benchmark fixture.
+
+## Non-goals / MVP non-scope
+
+Ultron does not mutate vendored Hermes source, global memory/skills, terminal backends, credentials, or cron/gateway/MCP config. Multi-user identity, remote tenants, production key management, distributed sessions, and topology orchestration are out of this MVP; the local default principal is a single-user dev boundary, not enterprise auth.
