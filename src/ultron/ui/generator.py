@@ -21,6 +21,8 @@ class UiGenContext(BaseModel):
     request_class: str
     run_output_summary: dict[str, Any] = Field(default_factory=dict)
     allowed_registry: list[ComponentType] = Field(default_factory=list)
+    request_image_metadata: list[dict[str, Any]] = Field(default_factory=list)
+    vlm_observations: list[str] = Field(default_factory=list)
 
 
 class UiSpecGenerator(Protocol):
@@ -51,6 +53,17 @@ class ModelProvider(Protocol):
     def complete(self, prompt: str, schema_hint: str | None) -> str: ...
 
 
+def _complete_text(provider: Any, prompt: str, schema_hint: str | None) -> str:
+    """Call a provider supporting either the typed LLM protocol or the legacy seam."""
+    if hasattr(provider, "complete_text"):
+        # Lazy import avoids a circular import with ultron.model_provider.
+        from ultron.model_provider import ModelMessage, ModelRole, TextPart
+
+        message = ModelMessage(role=ModelRole.USER, parts=[TextPart(text=prompt)])
+        return provider.complete_text([message], schema_hint).text
+    return provider.complete(prompt, schema_hint)
+
+
 class LiveModelUiSpecGenerator:
     def __init__(self, provider: ModelProvider | None = None) -> None:
         self.provider = provider
@@ -69,6 +82,8 @@ class LiveModelUiSpecGenerator:
             "run_output_summary": context.run_output_summary,
             "resolved_ui_panels": list(getattr(context.module_set_manifest, "resolved_ui_panels", [])),
             "allowed_components": [item.value for item in context.allowed_registry],
+            "request_image_metadata": context.request_image_metadata,
+            "vlm_observations": context.vlm_observations,
             "security": "Emit only server-owned component types and non-privileged declared actions.",
         }
 
@@ -76,7 +91,8 @@ class LiveModelUiSpecGenerator:
         if self.provider is None:
             raise LiveModelUnavailable("live model UI generation requires a configured model")
         prompt = json.dumps(self.build_prompt(context), sort_keys=True)
-        text = self.provider.complete(
+        text = _complete_text(
+            self.provider,
             prompt,
             "UiSpec JSON with components[{type,region,priority,props,telemetry_schema(max 8 strings, max 80 chars each)}] and optional spec_hash",
         )

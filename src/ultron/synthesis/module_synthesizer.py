@@ -13,7 +13,7 @@ from ultron.hermes.module_surface_contract import ModuleSurfaceContract
 from ultron.module.blobs import BlobStore, BudgetPolicyBlob, PromptPack, SafetyPolicyBlob, ToolPolicyBlob, UiPanelContract
 from ultron.module.model import FitnessMetadata, HarnessModule, PersistencePolicy, PrivacyMetadata, PromotionState, TargetLens
 from ultron.registry.store import ModuleRegistry, expands_module_permissions
-from ultron.ui.generator import LiveModelUnavailable, ModelProvider
+from ultron.ui.generator import LiveModelUnavailable, ModelProvider, _complete_text
 
 
 class SynthesisPolicyConstraints(BaseModel):
@@ -119,7 +119,7 @@ class LiveModelModuleSynthesizer:
         if self.provider is None:
             raise LiveModelUnavailable("live model module synthesis requires a configured model")
         prompt = json.dumps(self.build_prompt(context), sort_keys=True)
-        text = self.provider.complete(prompt, "HarnessModule JSON matching the server schema; no permission expansion; content_hash must match identity")
+        text = _complete_text(self.provider, prompt, "HarnessModule JSON matching the server schema; no permission expansion; content_hash must match identity")
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:

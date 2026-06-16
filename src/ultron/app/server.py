@@ -22,6 +22,7 @@ from ultron.evolution.variation import VariationPrimitive
 from ultron.ui.runtime import ActionCommand, ActionType, validate_action
 from ultron.hermes.adapter import LiveHermesUnavailable
 from ultron.ui.generator import LiveModelUnavailable
+from ultron.images import ImageRejected, MAX_IMAGE_COUNT, validate_image
 
 CSP = "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 STATIC_DIR = Path(__file__).with_name("static")
@@ -204,8 +205,9 @@ def create_app() -> FastAPI:
 
         if cmd.type is ActionType.SUBMIT_REQUEST:
             request_text = str(cmd.payload.get("request_text", ""))
+            image_parts = _extract_image_parts(cmd.payload)
             try:
-                result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text, actor=principal.subject if principal else None)
+                result = engine.start_run(DEFAULT_SCOPE, DEFAULT_WORKFLOW, request_text, actor=principal.subject if principal else None, image_parts=image_parts)
                 canary = engine.propose_and_canary(VariationPrimitive.PROMPT_SLOT_EDIT, {"prompt_pack_hash": f"submit request: {request_text}"}, request_text, actor=principal.subject if principal else None)
             except (LiveHermesUnavailable, LiveModelUnavailable) as exc:
                 raise HTTPException(status_code=503, detail=_generic_live_unavailable_detail(exc)) from exc
@@ -334,6 +336,39 @@ def _jsonable(value: Any) -> Any:
 
 def _short_hash(value: str | None) -> str | None:
     return hashlib.sha256(value.encode()).hexdigest()[:12] if value else None
+
+def _extract_image_parts(payload: dict[str, Any]) -> list:
+    """Decode and validate optional inline base64 image(s) from a submit payload.
+
+    Accepts ``image_base64`` (single) or ``images_base64`` (list). The raw base64
+    input is decoded, validated/sanitized into request-scoped ImageParts, then dropped.
+    Raises a 422 with a safe generic message on any rejection.
+    """
+    import base64
+    import binascii
+
+    raw_entries = payload.get("images_base64")
+    if raw_entries is None:
+        single = payload.get("image_base64")
+        raw_entries = [single] if single else []
+    if not isinstance(raw_entries, list):
+        raise HTTPException(status_code=422, detail="image validation failed")
+    if len(raw_entries) > MAX_IMAGE_COUNT:
+        raise HTTPException(status_code=422, detail="too many images")
+    parts = []
+    for entry in raw_entries:
+        if not isinstance(entry, str) or not entry:
+            raise HTTPException(status_code=422, detail="image validation failed")
+        encoded = entry.split(",", 1)[1] if entry.startswith("data:") else entry
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=422, detail="image validation failed") from None
+        try:
+            parts.append(validate_image(data))
+        except ImageRejected as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+    return parts
 
 
 if __name__ == "__main__":

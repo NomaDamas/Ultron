@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "fastapi", "uvicorn", "httpx", "jinja2"]
+dev = ["pytest", "fastapi", "uvicorn", "httpx", "jinja2", "pillow"]
 
 [project.scripts]
 ultron = "ultron.cli:main"

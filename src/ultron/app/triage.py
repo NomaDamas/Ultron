@@ -29,7 +29,7 @@ from ultron.feedback.aggregation import FeedbackAggregator, FeedbackSummary, can
 from ultron.module.contract import load_default_contract
 from ultron.hermes.module_surface_contract import ModuleSurfaceContract
 from ultron.synthesis.module_synthesizer import DeterministicFakeModuleSynthesizer, LiveModelModuleSynthesizer, ModuleSynthesizer, SynthesisContext, SynthesisPolicyConstraints, validate_synthesized_module
-from ultron.model_provider import HttpModelProvider
+from ultron.model_provider import DeterministicFakeVlmProvider, HttpModelProvider, ImagePart, ModelMessage, ModelRole, TextPart, VlmProvider
 from ultron.ledger.canary_store import CanaryScopedStore, RollbackController
 from ultron.ledger.side_effect_ledger import LedgerEntry, SideEffectKind, SideEffectLedger
 from ultron.obs.telemetry import TelemetrySink
@@ -77,7 +77,7 @@ class PersonalizationSummary(BaseModel):
 
 
 class TriageApp:
-    def __init__(self, adapter: HermesAdapter | None = None, ui_generator: UiSpecGenerator | None = None, module_synthesizer: ModuleSynthesizer | None = None) -> None:
+    def __init__(self, adapter: HermesAdapter | None = None, ui_generator: UiSpecGenerator | None = None, module_synthesizer: ModuleSynthesizer | None = None, vlm_provider: "VlmProvider | None" = None) -> None:
         self.ui_registry: set[ComponentType] = set(ComponentType)
         self.adapter_contract = load_default_contract()
         self.blob_store = BlobStore()
@@ -92,6 +92,7 @@ class TriageApp:
         self.variation_engine = VariationEngine(self.registry, self.adapter_contract, self.blob_store)
         self.ui_generator = ui_generator or DeterministicFakeUiSpecGenerator()
         self.module_synthesizer = module_synthesizer or DeterministicFakeModuleSynthesizer(self.blob_store, self.adapter_contract)
+        self.vlm_provider: "VlmProvider" = vlm_provider or DeterministicFakeVlmProvider()
         self.thresholds = SelectionThresholds(min_paired_tasks=10, min_primary_improvement=0.10)
         self.selector = Selector(self.thresholds)
         self.evolution_loop = EvolutionLoop(
@@ -194,8 +195,9 @@ class TriageApp:
         version, _ = self.pointer_store.get(self.pointer_key)
         return version
 
-    def start_run(self, user_scope: str, workflow_fingerprint: str, request_text: str, actor: str | None = None) -> dict[str, Any]:
+    def start_run(self, user_scope: str, workflow_fingerprint: str, request_text: str, actor: str | None = None, image_parts: list[ImagePart] | None = None) -> dict[str, Any]:
         self.seed_baseline()
+        image_metadata, vlm_observations = self.observe_images(image_parts or [], request_text)
         version, active = self.pointer_store.get((user_scope, workflow_fingerprint))
         should_bootstrap_pointer = False
         if not active and (user_scope, workflow_fingerprint) != self.pointer_key:
@@ -203,7 +205,7 @@ class TriageApp:
             should_bootstrap_pointer = True
             version = 1
         manifest = self.resolver.resolve(user_scope, workflow_fingerprint, "triage", active, {item.value for item in self.ui_registry})
-        ui_spec = self._generate_uispec(manifest, "triage", {"request_text": request_text})
+        ui_spec = self._generate_uispec(manifest, "triage", {"request_text": request_text}, image_metadata, vlm_observations)
         run_id = uuid.uuid4().hex
         session_id = uuid.uuid4().hex
         active_module_set_id = f"{user_scope}:{workflow_fingerprint}:v{version}"
@@ -1179,13 +1181,39 @@ class TriageApp:
             self.telemetry.increment("restores", event="restore", subject=actor)
         return {"module_hash": target, "pruned": pruned, "restored": restored}
 
-    def _generate_uispec(self, manifest: Any, request_class: str, run_output_summary: dict[str, Any] | None = None) -> UiSpec:
+    def observe_images(self, image_parts: list[ImagePart], request_text: str | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        """Run the VLM over text+image and return (safe_metadata, redacted_observations).
+
+        Raw image bytes/data URLs never leave the request scope; only bounded, redacted
+        observation strings and safe metadata flow onward as generation context.
+        """
+        if not image_parts:
+            return [], []
+        metadata = [part.metadata() for part in image_parts]
+        parts: list[Any] = [TextPart(text=str(request_text or "Describe the attached image."))]
+        parts.extend(image_parts)
+        message = ModelMessage(role=ModelRole.USER, parts=parts)
+        response = self.vlm_provider.complete_multimodal([message], "Return a short, bounded textual observation only.")
+        # VLM output is context only: bounded, redacted, never directly rendered.
+        observation = _redacted_summary_line(response.text, request_text, max_length=240)
+        return metadata, [observation]
+
+    def _generate_uispec(
+        self,
+        manifest: Any,
+        request_class: str,
+        run_output_summary: dict[str, Any] | None = None,
+        request_image_metadata: list[dict[str, Any]] | None = None,
+        vlm_observations: list[str] | None = None,
+    ) -> UiSpec:
         generated = self.ui_generator.generate(
             UiGenContext(
                 module_set_manifest=manifest,
                 request_class=request_class,
                 run_output_summary=run_output_summary or {},
                 allowed_registry=sorted(self.ui_registry, key=lambda item: item.value),
+                request_image_metadata=request_image_metadata or [],
+                vlm_observations=vlm_observations or [],
             )
         )
         return validate_generated_uispec(generated, self.ui_registry)
@@ -1315,7 +1343,17 @@ def build_triage_app_from_env(config_service: "ConfigService | None" = None) -> 
         ui_generator = LiveModelUiSpecGenerator(provider)
     else:
         raise ValueError(f"unknown ULTRON_UI_GENERATOR: {ui_name}")
-    app = TriageApp(adapter=adapter, ui_generator=ui_generator)
+    vlm_name = os.getenv("ULTRON_VLM", "fake")
+    vlm_provider: VlmProvider
+    if vlm_name == "fake":
+        vlm_provider = DeterministicFakeVlmProvider()
+    elif vlm_name == "model":
+        from ultron.model_provider import OpenAICompatibleVlmProvider
+
+        vlm_provider = OpenAICompatibleVlmProvider(config.provider_config("vlm"))
+    else:
+        raise ValueError(f"unknown ULTRON_VLM: {vlm_name}")
+    app = TriageApp(adapter=adapter, ui_generator=ui_generator, vlm_provider=vlm_provider)
     if synth_name == "fake":
         app.module_synthesizer = DeterministicFakeModuleSynthesizer(app.blob_store, app.adapter_contract)
     elif synth_name == "model":
