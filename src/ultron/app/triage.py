@@ -1193,7 +1193,13 @@ class TriageApp:
         parts: list[Any] = [TextPart(text=str(request_text or "Describe the attached image."))]
         parts.extend(image_parts)
         message = ModelMessage(role=ModelRole.USER, parts=parts)
-        response = self.vlm_provider.complete_multimodal([message], "Return a short, bounded textual observation only.")
+        try:
+            response = self.vlm_provider.complete_multimodal([message], "Return a short, bounded textual observation only.")
+        finally:
+            # Defend the request boundary: drop raw image payloads regardless of the
+            # provider implementation (custom providers may not discard them).
+            for part in image_parts:
+                part.discard_raw()
         # VLM output is context only: bounded, redacted, never directly rendered.
         observation = _redacted_summary_line(response.text, request_text, max_length=240)
         return metadata, [observation]

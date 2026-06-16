@@ -62,7 +62,9 @@ def validate_image(raw: bytes) -> ImagePart:
         with Image.open(io.BytesIO(raw)) as probe:
             probe.verify()  # detect truncation/corruption
         with Image.open(io.BytesIO(raw)) as img:
-            img.load()
+            # Enforce dimension/pixel caps from header metadata BEFORE decoding
+            # pixels, so a small compressed file declaring huge dimensions cannot
+            # force a large allocation.
             width, height = img.size
             if width <= 0 or height <= 0:
                 raise ImageRejected("image validation failed")
@@ -70,6 +72,7 @@ def validate_image(raw: bytes) -> ImagePart:
                 raise ImageRejected("image dimensions too large")
             if width * height > MAX_PIXELS:
                 raise ImageRejected("image dimensions too large")
+            img.load()
             mode = img.mode
             pixels = img.tobytes()
             # Rebuild from raw pixels so no EXIF/ICC/text metadata survives.

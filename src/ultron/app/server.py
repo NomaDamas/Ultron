@@ -22,7 +22,7 @@ from ultron.evolution.variation import VariationPrimitive
 from ultron.ui.runtime import ActionCommand, ActionType, validate_action
 from ultron.hermes.adapter import LiveHermesUnavailable
 from ultron.ui.generator import LiveModelUnavailable
-from ultron.images import ImageRejected, MAX_IMAGE_COUNT, validate_image
+from ultron.images import ImageRejected, MAX_BYTES, MAX_IMAGE_COUNT, validate_image
 
 CSP = "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 STATIC_DIR = Path(__file__).with_name("static")
@@ -360,6 +360,10 @@ def _extract_image_parts(payload: dict[str, Any]) -> list:
         if not isinstance(entry, str) or not entry:
             raise HTTPException(status_code=422, detail="image validation failed")
         encoded = entry.split(",", 1)[1] if entry.startswith("data:") else entry
+        # Reject by encoded length before allocating the decoded buffer.
+        # base64 expands ~4/3; allow a small margin for padding/prefix.
+        if len(encoded) > (MAX_BYTES // 3 + 1) * 4 + 256:
+            raise HTTPException(status_code=422, detail="image too large")
         try:
             data = base64.b64decode(encoded, validate=True)
         except (binascii.Error, ValueError):

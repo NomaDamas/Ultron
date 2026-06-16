@@ -236,3 +236,37 @@ def test_submit_with_garbage_image_safe_error(monkeypatch, tmp_path):
     )
     assert resp.status_code == 422
     assert "validation failed" in resp.text
+
+def test_observe_images_discards_raw_even_if_provider_keeps_it():
+    from ultron.app.triage import build_triage_app_from_env
+    from ultron.model_provider import ModelResponse
+
+    class _KeepRawVlm:
+        provider_id = "keeps-raw"
+        is_live = False
+
+        def complete_multimodal(self, messages, schema_hint=None):
+            return ModelResponse(text="observation", provider_name=self.provider_id, model_name="x")
+
+    engine = build_triage_app_from_env()
+    engine.vlm_provider = _KeepRawVlm()
+    part = validate_image(_png_bytes())
+    engine.observe_images([part], "look")
+    # request boundary discarded the raw payload regardless of provider behavior
+    with pytest.raises(LiveModelUnavailable):
+        part.provider_data_url()
+
+
+@pytest.mark.skipif(TestClient is None, reason="fastapi test client unavailable")
+def test_submit_rejects_oversized_base64_before_decode(monkeypatch, tmp_path):
+    monkeypatch.setenv("ULTRON_CONFIG_DIR", str(tmp_path / "cfg"))
+    client = TestClient(create_app())
+    csrf = client.get("/").cookies["ultron_csrf"]
+    huge_b64 = "A" * ((MAX_BYTES // 3 + 1) * 4 + 4096)
+    resp = client.post(
+        "/api/action",
+        headers={"X-CSRF-Token": csrf},
+        json={"type": "SUBMIT_REQUEST", "payload": {"request_text": "x", "image_base64": huge_b64}, "csrf_token": csrf},
+    )
+    assert resp.status_code == 422
+    assert "too large" in resp.text
