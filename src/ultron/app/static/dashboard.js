@@ -1,5 +1,11 @@
 const state = { csrfCookieName: 'ultron_csrf', activePointerVersion: null };
 
+function cookieValue(name) {
+  const prefix = `${name}=`;
+  const pair = document.cookie.split('; ').find((part) => part.startsWith(prefix));
+  return pair ? decodeURIComponent(pair.slice(prefix.length)) : '';
+}
+
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -22,7 +28,7 @@ function createShell() {
   header.append(brand, nav);
 
   const grid = el('main', 'dashboard-grid');
-  for (const [id, title] of [['ecology', 'Evolution ecology'], ['runs', 'Runs & evidence'], ['personalization', 'Personalization / Self-evolution'], ['safety', 'Safety / approvals'], ['metrics', 'Metrics']]) {
+  for (const [id, title] of [['ecology', 'Evolution ecology'], ['runs', 'Runs & evidence'], ['personalization', 'Personalization / Self-evolution'], ['safety', 'Safety / approvals'], ['settings', 'Model settings'], ['metrics', 'Metrics']]) {
     const section = el('section', 'panel');
     section.id = id;
     section.append(el('h2', null, title), el('div', 'panel-body', 'Loading…'));
@@ -39,18 +45,20 @@ async function getJson(url) {
 }
 
 async function refreshAll() {
-  const [ecology, runs, ledger, personalization, metrics] = await Promise.all([
+  const [ecology, runs, ledger, personalization, metrics, settings] = await Promise.all([
     getJson('/api/ecology'),
     getJson('/api/runs'),
     getJson('/api/ledger'),
     getJson('/api/personalization'),
-    getJson('/api/metrics')
+    getJson('/api/metrics'),
+    getJson('/api/settings/model')
   ]);
   state.activePointerVersion = ecology.active_pointer_version;
   renderEcology(ecology);
   renderRuns(runs, ledger);
   renderPersonalization(personalization);
   renderSafety(ledger.safety || {});
+  renderSettings(settings);
   renderMetrics(metrics);
 }
 
@@ -192,6 +200,79 @@ function formatValue(value) {
 
 function shortHash(value) {
   return value ? String(value).slice(0, 12) : '—';
+}
+
+function renderSettings(data) {
+  const parent = body('settings');
+  const status = el('section', 'subpanel');
+  status.append(el('h3', null, 'Provider status (read-only, redacted)'));
+  const list = el('div', 'table-list');
+  list.append(row(['LLM', data.llm_configured ? 'configured' : 'unset', data.llm_model || '—', data.llm_base_url_label || '—', keyRefLabel(data.llm_api_key)]));
+  list.append(row(['VLM', data.vlm_configured ? 'configured' : 'unset', data.vlm_model || '—', data.vlm_base_url_label || '—', keyRefLabel(data.vlm_api_key)]));
+  status.append(list);
+
+  const form = el('form', 'settings-form');
+  form.append(el('h3', null, 'Update (write-only — keys never displayed)'));
+  const fields = [
+    ['llm_base_url', 'LLM base URL', 'text'],
+    ['llm_model', 'LLM model', 'text'],
+    ['llm_api_key', 'LLM API key', 'password'],
+    ['vlm_base_url', 'VLM base URL', 'text'],
+    ['vlm_model', 'VLM model', 'text'],
+    ['vlm_api_key', 'VLM API key', 'password']
+  ];
+  const inputs = {};
+  for (const [name, label, type] of fields) {
+    const wrap = el('label', 'settings-field');
+    wrap.append(el('span', null, label));
+    const input = el('input', 'settings-input');
+    input.type = type;
+    input.name = name;
+    input.autocomplete = 'off';
+    wrap.append(input);
+    inputs[name] = input;
+    form.append(wrap);
+  }
+  const submit = el('button', 'send-button', 'Save settings');
+  submit.type = 'submit';
+  form.append(submit);
+  const note = el('p', 'settings-note');
+  form.append(note);
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    submitSettings(inputs, note);
+  });
+  parent.append(status, form);
+}
+
+function keyRefLabel(ref) {
+  if (!ref || !ref.configured) return 'unset';
+  return `set ·••${ref.last4 || '????'} (${ref.source || 'secret_store'})`;
+}
+
+async function submitSettings(inputs, note) {
+  const payload = {};
+  for (const [name, input] of Object.entries(inputs)) {
+    if (input.value) payload[name] = input.value;
+  }
+  // Clear key inputs immediately; never retain raw secrets in the DOM.
+  inputs.llm_api_key.value = '';
+  inputs.vlm_api_key.value = '';
+  if (Object.keys(payload).length === 0) { note.textContent = 'Nothing to update.'; return; }
+  const csrf = cookieValue(state.csrfCookieName);
+  try {
+    const response = await fetch('/api/settings/model', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) { note.textContent = typeof data.detail === 'string' ? data.detail : 'Update rejected.'; return; }
+    note.textContent = 'Settings saved.';
+    renderSettings(data);
+  } catch (error) {
+    note.textContent = `Network error: ${error.message || error}`;
+  }
 }
 
 createShell();

@@ -138,15 +138,16 @@ function modeLabel() {
 
 function onImageSelected(event) {
   const file = event.target.files && event.target.files[0];
+  // Drop any prior attachment first: a rejected/failed new selection must never
+  // leave a stale data URL resident that a later submit could send.
+  clearPendingImage();
   if (!file) return;
   if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
     setStatus('Unsupported image type. Use PNG, JPEG, or WebP.');
-    event.target.value = '';
     return;
   }
   if (file.size > MAX_IMAGE_BYTES) {
     setStatus('Image too large (max 4 MiB).');
-    event.target.value = '';
     return;
   }
   const reader = new FileReader();
@@ -154,7 +155,7 @@ function onImageSelected(event) {
     state.pendingImage = { dataUrl: String(reader.result), name: file.name };
     showImageChip(file.name);
   };
-  reader.onerror = () => setStatus('Could not read the selected image.');
+  reader.onerror = () => { clearPendingImage(); setStatus('Could not read the selected image.'); };
   reader.readAsDataURL(file);
 }
 
@@ -223,10 +224,23 @@ function reduceCanvas(data) {
   if (empty) empty.remove();
 
   const group = el('section', 'canvas-group');
+  group.dataset.pinned = 'false';
+  const head = el('div', 'group-head');
+  const pin = el('button', 'pin-toggle', 'Pin');
+  pin.type = 'button';
+  pin.setAttribute('aria-pressed', 'false');
+  pin.addEventListener('click', () => {
+    const pinned = group.dataset.pinned === 'true';
+    group.dataset.pinned = pinned ? 'false' : 'true';
+    group.classList.toggle('pinned', !pinned);
+    pin.setAttribute('aria-pressed', String(!pinned));
+    pin.textContent = pinned ? 'Pin' : 'Pinned';
+  });
+  head.append(pin);
   const cards = el('div', 'cards');
   if (data.envelope) renderInlineEnvelope(cards, data.envelope, data);
   else cards.append(card('Action complete', { status: data.status || 'ok' }));
-  group.append(cards);
+  group.append(head, cards);
 
   if (state.mode === 'replace') {
     canvas.textContent = '';
@@ -240,19 +254,22 @@ function reduceCanvas(data) {
   group.scrollIntoView({ block: 'nearest' });
 }
 
+function evictOldestGroup(canvas) {
+  // Prefer the oldest non-pinned group; only evict a pinned group if every
+  // remaining group is pinned.
+  const groups = Array.from(canvas.querySelectorAll('.canvas-group'));
+  const victim = groups.find((g) => g.dataset.pinned !== 'true') || groups[0];
+  if (victim) victim.remove();
+}
+
 function enforceCanvasCaps(canvas) {
   // Drop oldest non-pinned groups beyond the envelope cap.
-  let groups = canvas.querySelectorAll('.canvas-group');
-  while (groups.length > MAX_CANVAS_ENVELOPES) {
-    groups[0].remove();
-    groups = canvas.querySelectorAll('.canvas-group');
+  while (canvas.querySelectorAll('.canvas-group').length > MAX_CANVAS_ENVELOPES) {
+    evictOldestGroup(canvas);
   }
-  // Drop oldest groups until total card count is within the card cap.
-  let totalCards = canvas.querySelectorAll('.card').length;
-  while (totalCards > MAX_CANVAS_CARDS && groups.length > 1) {
-    groups[0].remove();
-    groups = canvas.querySelectorAll('.canvas-group');
-    totalCards = canvas.querySelectorAll('.card').length;
+  // Drop oldest non-pinned groups until total card count is within the card cap.
+  while (canvas.querySelectorAll('.card').length > MAX_CANVAS_CARDS && canvas.querySelectorAll('.canvas-group').length > 1) {
+    evictOldestGroup(canvas);
   }
   state.envelopeCount = canvas.querySelectorAll('.canvas-group').length;
 }

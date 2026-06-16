@@ -54,6 +54,17 @@ def test_image_picker_and_no_raw_retention():
     # raw image reference dropped immediately after sending; not retained in state
     assert "clearPendingImage()" in src
     assert "state.pendingImage = null" in src
+    # a rejected/failed new selection clears any prior attachment first
+    onselect = src.split("function onImageSelected")[1].split("\nfunction ")[0]
+    assert onselect.index("clearPendingImage()") < onselect.index("ALLOWED_IMAGE_TYPES.includes")
+
+
+def test_pinned_aware_eviction():
+    src = _js()
+    assert "function evictOldestGroup" in src
+    assert "dataset.pinned" in src
+    assert "pin-toggle" in src
+    assert "g.dataset.pinned !== 'true'" in src
 
 
 def test_chat_js_remains_csp_safe():

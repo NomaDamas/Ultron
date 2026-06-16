@@ -159,6 +159,16 @@ a { color: var(--accent); text-decoration: none; }
 }
 .canvas-group { display: grid; gap: 12px; min-width: 0; }
 .canvas-group + .canvas-group { border-top: 1px dashed rgba(0, 212, 255, 0.14); padding-top: 16px; }
+.canvas-group.pinned { border-left: 2px solid rgba(52, 211, 153, 0.6); padding-left: 12px; }
+.group-head { display: flex; justify-content: flex-end; }
+.pin-toggle {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  color: var(--muted);
+  background: rgba(0, 180, 216, 0.08);
+}
+.pin-toggle[aria-pressed="true"] { color: #c7f9e8; border-color: rgba(52, 211, 153, 0.55); background: rgba(52, 211, 153, 0.14); }
 
 .cards {
   display: grid;
