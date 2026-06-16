@@ -1,4 +1,22 @@
-const state = { csrfCookieName: 'ultron_csrf', lastRunId: null, activePointerVersion: null };
+// Ultron command surface: a command bar + a bounded generative-UI canvas.
+// CSP-strict: DOM is built with createElement/textContent only (no unsafe HTML sinks).
+// Modes: REPLACE (A) transforms the canvas each command; ACCUMULATE (B) keeps a
+// capped workspace of validated cards. No raw prompt/image/key/payload is retained.
+
+const MAX_CANVAS_ENVELOPES = 20;
+const MAX_CANVAS_CARDS = 120;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // mirror server cap (pre-decode)
+const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+
+const state = {
+  csrfCookieName: 'ultron_csrf',
+  lastRunId: null,
+  activePointerVersion: null,
+  mode: 'replace',
+  pendingImage: null, // { dataUrl, name } cleared immediately after send
+  envelopeCount: 0
+};
+
 const ANIMATION_CLASS = {
   none: '',
   fade_in: 'anim-fade-in',
@@ -27,13 +45,14 @@ function createShell() {
   state.csrfCookieName = app?.dataset?.csrfCookie || 'ultron_csrf';
   app.textContent = '';
 
-  const shell = el('div', 'chat-shell');
+  const shell = el('div', 'hud-shell');
+
   const header = el('header', 'topbar');
   const brand = el('div', 'brand');
   const orb = el('span', 'ultron-orb');
   orb.setAttribute('aria-hidden', 'true');
   const copy = el('div', 'brand-copy');
-  copy.append(el('strong', null, 'Ultron'), el('span', null, 'JARVIS HUD online · chat control surface'));
+  copy.append(el('strong', null, 'Ultron'), el('span', null, 'JARVIS HUD · generative command surface'));
   brand.append(orb, copy);
   const presence = el('div', 'status-presence');
   presence.append(el('span', 'status-dot'), el('span', null, 'Core stable'));
@@ -43,56 +62,133 @@ function createShell() {
   nav.append(dashboard);
   header.append(brand, presence, nav);
 
-  const main = el('main', 'chat-main');
-  const thread = el('section', 'thread');
-  thread.id = 'thread';
-  thread.setAttribute('aria-live', 'polite');
-  const intro = el('article', 'turn agent-turn');
-  intro.append(el('p', 'bubble agent-bubble', 'Mission control online. Tell me the workflow harness behavior you want; inline GenUI cards will render in this thread.'));
-  thread.append(intro);
+  const main = el('main', 'hud-main');
 
-  const composer = el('form', 'composer');
-  const input = el('textarea', 'composer-input');
+  // Canvas: the generative-UI workspace.
+  const canvasWrap = el('section', 'canvas-wrap');
+  canvasWrap.setAttribute('aria-live', 'polite');
+  const canvas = el('div', 'canvas');
+  canvas.id = 'canvas';
+  const empty = el('div', 'canvas-empty');
+  empty.id = 'canvas-empty';
+  empty.append(el('p', null, 'Issue a command. Tools surface here as inline GenUI cards.'));
+  canvas.append(empty);
+  canvasWrap.append(canvas);
+
+  // Status line (notices, errors) — not a transcript.
+  const status = el('div', 'status-line');
+  status.id = 'status-line';
+
+  // Command bar.
+  const bar = el('form', 'command-bar');
+  const input = el('textarea', 'command-input');
   input.name = 'request_text';
-  input.rows = 3;
-  input.placeholder = 'Build or tune a tool for my workflow…';
-  const send = el('button', 'send-button', 'Send');
+  input.rows = 2;
+  input.placeholder = 'Command Ultron — build or tune a harness tool…';
+  input.id = 'command-input';
+
+  const controls = el('div', 'command-controls');
+
+  // Mode toggle (A replace / B accumulate).
+  const modeToggle = el('button', 'mode-toggle', modeLabel());
+  modeToggle.type = 'button';
+  modeToggle.id = 'mode-toggle';
+  modeToggle.setAttribute('aria-pressed', 'false');
+  modeToggle.addEventListener('click', () => {
+    state.mode = state.mode === 'replace' ? 'accumulate' : 'replace';
+    modeToggle.textContent = modeLabel();
+    modeToggle.setAttribute('aria-pressed', String(state.mode === 'accumulate'));
+    setStatus(`Canvas mode: ${state.mode === 'replace' ? 'Replace (A)' : 'Accumulate (B)'}`);
+  });
+
+  // Image picker.
+  const fileInput = el('input', 'image-input');
+  fileInput.type = 'file';
+  fileInput.id = 'image-input';
+  fileInput.accept = ALLOWED_IMAGE_TYPES.join(',');
+  fileInput.addEventListener('change', onImageSelected);
+  const imageButton = el('button', 'image-button', 'Attach image');
+  imageButton.type = 'button';
+  imageButton.addEventListener('click', () => fileInput.click());
+  const imageChip = el('span', 'image-chip');
+  imageChip.id = 'image-chip';
+  imageChip.hidden = true;
+
+  const send = el('button', 'send-button', 'Run');
   send.type = 'submit';
-  composer.append(input, send);
-  composer.addEventListener('submit', (event) => {
+
+  controls.append(modeToggle, imageButton, imageChip, fileInput, send);
+  bar.append(input, controls);
+  bar.addEventListener('submit', (event) => {
     event.preventDefault();
     const text = input.value.trim();
-    if (!text) return;
+    if (!text && !state.pendingImage) return;
     input.value = '';
-    appendUserTurn(text);
     submitRequest(text);
   });
-  main.append(thread, composer);
 
+  main.append(canvasWrap, status, bar);
   shell.append(header, main);
   app.append(shell);
 }
 
-function appendUserTurn(text) {
-  const turn = el('article', 'turn user-turn');
-  turn.append(el('p', 'bubble user-bubble', text));
-  appendTurn(turn);
+function modeLabel() {
+  return state.mode === 'replace' ? 'Mode: Replace (A)' : 'Mode: Accumulate (B)';
 }
 
-function appendTurn(turn) {
-  const thread = document.getElementById('thread');
-  thread.append(turn);
-  thread.scrollTop = thread.scrollHeight;
+function onImageSelected(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+    setStatus('Unsupported image type. Use PNG, JPEG, or WebP.');
+    event.target.value = '';
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    setStatus('Image too large (max 4 MiB).');
+    event.target.value = '';
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.pendingImage = { dataUrl: String(reader.result), name: file.name };
+    showImageChip(file.name);
+  };
+  reader.onerror = () => setStatus('Could not read the selected image.');
+  reader.readAsDataURL(file);
+}
+
+function showImageChip(name) {
+  const chip = document.getElementById('image-chip');
+  if (!chip) return;
+  chip.textContent = '';
+  chip.append(el('span', null, `Image attached`));
+  const clear = el('button', 'chip-clear', '×');
+  clear.type = 'button';
+  clear.setAttribute('aria-label', 'Remove attached image');
+  clear.addEventListener('click', clearPendingImage);
+  chip.append(clear);
+  chip.hidden = false;
+}
+
+function clearPendingImage() {
+  state.pendingImage = null;
+  const chip = document.getElementById('image-chip');
+  if (chip) { chip.hidden = true; chip.textContent = ''; }
+  const fileInput = document.getElementById('image-input');
+  if (fileInput) fileInput.value = '';
 }
 
 async function submitRequest(requestText) {
-  const pending = el('article', 'turn agent-turn');
-  pending.append(el('p', 'bubble agent-bubble', 'Working locally on the run and shaping your harness…'));
-  appendTurn(pending);
-  const data = await sendAction('SUBMIT_REQUEST', { request_text: requestText });
-  pending.remove();
-  if (!data || !data.ok) return;
-  appendAgentTurn(data);
+  setStatus('Working on the run and shaping your harness…', true);
+  const payload = { request_text: requestText };
+  if (state.pendingImage) payload.image_base64 = state.pendingImage.dataUrl;
+  // Drop the raw image reference immediately; it is not retained in client state.
+  clearPendingImage();
+  const data = await sendAction('SUBMIT_REQUEST', payload);
+  if (!data || !data.ok) { setStatus(''); return; }
+  setStatus('');
+  reduceCanvas(data);
 }
 
 async function sendAction(type, payload) {
@@ -106,38 +202,59 @@ async function sendAction(type, payload) {
     });
     const data = await safeJson(response);
     if (!response.ok) {
-      appendNotice(friendlyError(response.status, data));
+      setStatus(friendlyError(response.status, data));
       return data;
     }
     return data;
   } catch (error) {
-    appendNotice(`Network error: ${error.message || error}`);
+    setStatus(`Network error: ${error.message || error}`);
     return null;
   }
 }
 
-function appendAgentTurn(data) {
-  const turn = el('article', 'turn agent-turn');
+// Bounded reducer: REPLACE clears prior cards; ACCUMULATE appends up to caps.
+function reduceCanvas(data) {
+  const canvas = document.getElementById('canvas');
+  if (!canvas) return;
   state.lastRunId = data.envelope?.run_id || data.run_id || state.lastRunId;
   state.activePointerVersion = data.envelope?.provenance?.active_pointer_version ?? data.active_pointer_version ?? state.activePointerVersion;
-  turn.append(el('p', 'bubble agent-bubble', 'I ran the request and generated an inline control surface for the resulting plan, risk, tests, and evidence.'));
+
+  const empty = document.getElementById('canvas-empty');
+  if (empty) empty.remove();
+
+  const group = el('section', 'canvas-group');
   const cards = el('div', 'cards');
   if (data.envelope) renderInlineEnvelope(cards, data.envelope, data);
   else cards.append(card('Action complete', { status: data.status || 'ok' }));
-  turn.append(cards);
-  appendTurn(turn);
-}
+  group.append(cards);
 
-function renderRunOutput(parent, output) {
-  for (const key of ['plan', 'risk', 'tests']) {
-    const value = output?.[key];
-    if (value !== undefined) parent.append(card(humanize(key), value));
+  if (state.mode === 'replace') {
+    canvas.textContent = '';
+    canvas.append(group);
+    state.envelopeCount = 1;
+  } else {
+    canvas.append(group);
+    state.envelopeCount += 1;
+    enforceCanvasCaps(canvas);
   }
+  group.scrollIntoView({ block: 'nearest' });
 }
 
-function renderUiSpec(parent, spec) {
-  const components = Array.isArray(spec?.components) ? spec.components : [];
-  for (const component of components) parent.append(renderComponent(component, {}));
+function enforceCanvasCaps(canvas) {
+  // Drop oldest non-pinned groups beyond the envelope cap.
+  let groups = canvas.querySelectorAll('.canvas-group');
+  while (groups.length > MAX_CANVAS_ENVELOPES) {
+    groups[0].remove();
+    groups = canvas.querySelectorAll('.canvas-group');
+  }
+  // Drop oldest groups until total card count is within the card cap.
+  let totalCards = canvas.querySelectorAll('.card').length;
+  while (totalCards > MAX_CANVAS_CARDS && groups.length > 1) {
+    groups[0].remove();
+    groups = canvas.querySelectorAll('.canvas-group');
+    totalCards = canvas.querySelectorAll('.card').length;
+  }
+  state.envelopeCount = canvas.querySelectorAll('.canvas-group').length;
 }
 
 function renderInlineEnvelope(parent, envelope, data) {
@@ -240,7 +357,7 @@ function actionButton(label, type, payload) {
   button.type = 'button';
   button.addEventListener('click', async () => {
     const data = await sendAction(type, payload || {});
-    if (data?.ok) appendNotice(`${humanize(type)} accepted.`);
+    if (data?.ok) setStatus(`${humanize(type)} accepted.`);
   });
   return button;
 }
@@ -250,12 +367,6 @@ function applyAnimation(node, animation) {
   const kind = typeof animation?.kind === 'string' ? animation.kind : 'none';
   const className = ANIMATION_CLASS[kind] || '';
   if (className) node.classList.add(className);
-}
-
-
-async function sendFeedback(rating, comment) {
-  const data = await sendAction('GIVE_FEEDBACK', { run_id: state.lastRunId || 'run', rating, comment });
-  if (data?.ok) appendNotice('Preference signal recorded. Your harness will be whittled with that feedback.');
 }
 
 function card(title, value) {
@@ -277,10 +388,11 @@ function addKv(parent, key, value) {
   parent.append(row);
 }
 
-function appendNotice(message) {
-  const turn = el('article', 'turn notice-turn');
-  turn.append(el('p', 'notice', message));
-  appendTurn(turn);
+function setStatus(message, busy) {
+  const status = document.getElementById('status-line');
+  if (!status) return;
+  status.textContent = message || '';
+  status.classList.toggle('busy', Boolean(busy));
 }
 
 function friendlyError(status, data) {
@@ -307,10 +419,6 @@ function formatValue(value) {
   if (Array.isArray(value)) return value.map(formatValue).join(', ');
   if (typeof value === 'object') return JSON.stringify(value, null, 2);
   return String(value);
-}
-
-function shortHash(value) {
-  return value ? String(value).slice(0, 12) : '—';
 }
 
 createShell();
